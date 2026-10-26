@@ -34,9 +34,9 @@ def private_file(path, body):
 
 def validate_board(board):
     if not isinstance(board, dict) or board.get('board_name') != 'keenetic,kn-1112':
-        raise DeviceError('Device model is not Keenetic KN-1112. Flashing refused.')
+        raise DeviceError('Модель устройства не соответствует Keenetic KN-1112. Запись прошивки запрещена.')
     if board.get('release', {}).get('target') != TARGET:
-        raise DeviceError('Unexpected OpenWrt target. Flashing refused.')
+        raise DeviceError('Платформа OpenWrt не соответствует ожидаемой. Запись прошивки запрещена.')
 
 
 def verify_backup(body, required):
@@ -46,11 +46,11 @@ def verify_backup(body, required):
             while block := compressed.read(65536):
                 unpacked += len(block)
                 if unpacked > 64 * 1024 * 1024:
-                    raise DeviceError('Unpacked backup exceeds the size limit.')
+                    raise DeviceError('Распакованная резервная копия превышает допустимый размер.')
         with tarfile.open(fileobj=io.BytesIO(body), mode='r:gz') as archive:
             names = {item.name.removeprefix('./').lstrip('/') for item in archive.getmembers() if item.isfile()}
             if 'etc/config/network' not in names or any(name.lstrip('/') not in names for name in required):
-                raise DeviceError('Backup does not contain all existing network settings and VPN profiles.')
+                raise DeviceError('В резервной копии отсутствует часть действующих настроек сети или профилей VPN.')
             for item in archive.getmembers():
                 if item.isfile():
                     source = archive.extractfile(item)
@@ -58,24 +58,25 @@ def verify_backup(body, required):
                         while source.read(65536):
                             pass
     except (tarfile.TarError, OSError, EOFError, zlib.error) as exc:
-        raise DeviceError('Router backup is not a valid readable archive.') from exc
+        raise DeviceError('Не удалось прочитать резервную копию роутера: архив повреждён или имеет неверный формат.') from exc
 
 
 class Router:
-    def __init__(self, host, port=22, user='root', identity=None, state_dir=None):
+    def __init__(self, host, port=22, user='root', identity=None, state_dir=None, *, on_stage=None, progress=None):
         if not isinstance(host, str) or not host or any(c.isspace() for c in host) or host.startswith('-'):
-            raise DeviceError('Specify a router hostname or IP address.')
+            raise DeviceError('Укажите имя узла или IP-адрес роутера.')
         if not 1 <= port <= 65535:
-            raise DeviceError('SSH port must be between 1 and 65535.')
+            raise DeviceError('Порт SSH должен быть числом от 1 до 65535.')
         self.host, self.port, self.user, self.identity = host, port, user, identity
         self.state_dir = Path(state_dir or Path.home() / '.proxys22')
         self.client = None
+        self.on_stage, self.progress = on_stage, progress
 
     def __enter__(self):
         try:
             import paramiko
         except ImportError as exc:
-            raise DeviceError('Install requirements-manager.txt or use the packaged executable.') from exc
+            raise DeviceError('Установите зависимости из requirements-manager.txt или используйте готовую программу.') from exc
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         known_hosts = self.state_dir / 'known_hosts'
         if not known_hosts.exists():
@@ -84,9 +85,12 @@ class Router:
         class ConfirmHost(paramiko.MissingHostKeyPolicy):
             def missing_host_key(policy, client, hostname, key):
                 fingerprint = base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip('=')
-                print(f'New SSH host: {hostname}\n{key.get_name()} SHA256:{fingerprint}')
-                if input('Verify the fingerprint on the device. Type TRUST to save it: ').strip() != 'TRUST':
-                    raise DeviceError('SSH host key was not accepted.')
+                print(f'Новое SSH-устройство: {hostname}\n{key.get_name()} SHA256:{fingerprint}', file=sys.stderr)
+                print('Сверьте отпечаток ключа с устройством. Введите ДОВЕРЯЮ, чтобы сохранить ключ\n'
+                      'и разрешить это подключение. Это не запускает запись прошивки.\n  > ',
+                      end='', file=sys.stderr, flush=True)
+                if input().strip().casefold() != 'доверяю':
+                    raise DeviceError('Ключ SSH устройства не принят. Подключение отменено.')
                 client.get_host_keys().add(hostname, key.get_name(), key)
                 client.save_host_keys(str(known_hosts))
 
@@ -110,29 +114,29 @@ class Router:
                 self.client = connect()
             except paramiko.PasswordRequiredException:
                 if not sys.stdin.isatty():
-                    raise DeviceError('An encrypted SSH key needs an interactive terminal.')
-                self.client = connect(passphrase=getpass.getpass('SSH key passphrase: '))
+                    raise DeviceError('Для разблокировки зашифрованного SSH-ключа нужен интерактивный терминал.')
+                self.client = connect(passphrase=getpass.getpass('Пароль SSH-ключа: '))
             except paramiko.SSHException as exc:
                 if isinstance(exc, paramiko.AuthenticationException) or str(exc) == 'No authentication methods available':
                     if not sys.stdin.isatty():
-                        raise DeviceError('Password authentication needs an interactive terminal; use --identity for automation.')
-                    self.client = connect(password=getpass.getpass('Router SSH password: '))
+                        raise DeviceError('Для ввода пароля нужен интерактивный терминал. Для автоматизации используйте --identity.')
+                    self.client = connect(password=getpass.getpass('Пароль SSH роутера: '))
                 else:
                     raise
         except paramiko.BadHostKeyException as exc:
-            raise DeviceError('SSH host key changed. Verify the device identity; connection refused.') from exc
+            raise DeviceError('Ключ SSH устройства изменился. Проверьте подлинность роутера. Подключение запрещено.') from exc
         except (paramiko.SSHException, OSError) as exc:
-            raise DeviceError('SSH connection failed. Check the address, Ethernet connection and credentials.') from exc
+            raise DeviceError('Не удалось подключиться по SSH. Проверьте адрес, Ethernet-соединение и данные для входа.') from exc
         return self
 
     def __exit__(self, *_args):
         if self.client:
             self.client.close()
 
-    def run(self, command, data=None, timeout=30, limit=2 * 1024 * 1024):
+    def run(self, command, data=None, timeout=30, limit=2 * 1024 * 1024, progress=None):
         transport = self.client.get_transport()
         if transport is None or not transport.is_active():
-            raise DeviceError('SSH connection is closed.')
+            raise DeviceError('SSH-соединение закрыто.')
         channel = transport.open_session(timeout=12)
         output, errors = bytearray(), bytearray()
         deadline = time.monotonic() + timeout
@@ -140,26 +144,37 @@ class Router:
             channel.settimeout(timeout)
             channel.exec_command(command)
             if data is not None:
-                channel.sendall(data)
+                total = len(data)
+                if progress:
+                    progress(0, total)
+                for offset in range(0, total, 65536):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise DeviceError('Превышено время ожидания команды на устройстве.')
+                    channel.settimeout(remaining)
+                    block = data[offset:offset + 65536]
+                    channel.sendall(block)
+                    if progress:
+                        progress(offset + len(block), total)
             channel.shutdown_write()
             while True:
                 while channel.recv_ready():
                     output.extend(channel.recv(65536))
                     if len(output) > limit:
-                        raise DeviceError('Device response exceeded the size limit.')
+                        raise DeviceError('Ответ устройства превышает допустимый размер.')
                 while channel.recv_stderr_ready():
                     errors.extend(channel.recv_stderr(65536))
                     if len(errors) > 65536:
-                        raise DeviceError('Device error response exceeded the size limit.')
+                        raise DeviceError('Сообщение об ошибке устройства превышает допустимый размер.')
                 if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
                     if channel.recv_exit_status() != 0:
-                        raise DeviceError('Device command failed. No forced upgrade will be attempted.')
+                        raise DeviceError('Команда на устройстве завершилась с ошибкой. Принудительная запись прошивки не выполняется.')
                     return bytes(output)
                 if time.monotonic() >= deadline:
-                    raise DeviceError('Device command timed out.')
+                    raise DeviceError('Превышено время ожидания команды на устройстве.')
                 time.sleep(0.02)
         except (socket.timeout, EOFError, OSError) as exc:
-            raise DeviceError('SSH command interrupted. Check device status before retrying.') from exc
+            raise DeviceError('Выполнение команды SSH прервано. Перед повторной попыткой проверьте состояние устройства.') from exc
         finally:
             channel.close()
 
@@ -169,15 +184,15 @@ class Router:
             validate_board(board)
             return board
         except (ValueError, TypeError) as exc:
-            raise DeviceError('Cannot identify the device through OpenWrt ubus.') from exc
+            raise DeviceError('Не удалось определить модель устройства через OpenWrt ubus.') from exc
 
     def firmware(self):
         try:
             release = json.loads(self.run('cat /etc/proxys22-release'))
         except ValueError as exc:
-            raise DeviceError('The device does not report a valid proxys22 release.') from exc
+            raise DeviceError('Устройство не сообщает корректные данные о версии proxys22.') from exc
         if not isinstance(release, dict) or release.get('name') != 'proxys22':
-            raise DeviceError('Only an installed proxys22 system can be upgraded.')
+            raise DeviceError('Обновление доступно только для устройства с уже установленной proxys22.')
         return release
 
     def backup(self, directory):
@@ -186,7 +201,7 @@ class Router:
                             '/etc/wifi-proxy/client.json /etc/wifi-proxy/awg.json; do '
                             'if [ -f "$f" ]; then printf "%s\\n" "$f"; fi; done').decode().splitlines()
         if '/etc/wifi-proxy/initialized' not in required:
-            raise DeviceError('Initialization marker is missing; preserve the existing settings before upgrading.')
+            raise DeviceError('Отсутствует маркер инициализации. Перед обновлением обеспечьте сохранение действующих настроек.')
         body = self.run('umask 077; f=$(mktemp /tmp/proxys22-backup.XXXXXX) || exit 1; '
                         'sysupgrade -b "$f" >&2 && cat "$f"; result=$?; rm -f "$f"; exit "$result"',
                         timeout=90, limit=16 * 1024 * 1024)
@@ -199,27 +214,39 @@ class Router:
         return path
 
     def upgrade(self, image_path, image: FirmwareImage, backup_directory, confirm):
+        stage = getattr(self, 'on_stage', None) or (lambda message: None)
+        stage('Проверка образа прошивки и модели роутера')
         if image.kind != 'sysupgrade':
-            raise DeviceError('Upgrades require a sysupgrade image, never a factory image.')
+            raise DeviceError('Для обновления нужен образ sysupgrade. Образ factory использовать нельзя.')
         verify_image(image_path, image)
         self.board()
         self.firmware()
+        stage('Создание и проверка резервной копии настроек')
         backup = self.backup(backup_directory)
-        print(f'Backup verified: {backup}')
+        print(f'Резервная копия проверена: {backup}')
         remote = '/tmp/proxys22-' + uuid.uuid4().hex + '-sysupgrade.bin'
         quoted = shlex.quote(remote)
         started = False
         try:
-            self.run(f'umask 077; cat > {quoted}', Path(image_path).read_bytes(), timeout=180)
+            stage('Передача прошивки на роутер')
+            upload_options = {'timeout': 180}
+            if getattr(self, 'progress', None):
+                upload_options['progress'] = self.progress
+            self.run(f'umask 077; cat > {quoted}', Path(image_path).read_bytes(), **upload_options)
+            stage('Проверка SHA-256 прошивки на роутере')
             digest = self.run(f'sha256sum {quoted}').decode('ascii', errors='replace').split()
             if not digest or digest[0] != image.sha256:
-                raise DeviceError('On-device firmware SHA-256 verification failed.')
+                raise DeviceError('Контрольная сумма SHA-256 файла на роутере не совпадает с проверенным образом.')
+            stage('Проверка совместимости образа: sysupgrade -T')
             self.run(f'sysupgrade -T {quoted}', timeout=120)
-            if not confirm('All checks passed. Type UPDATE to flash and reboot, or press Enter to cancel: ', 'UPDATE'):
-                raise DeviceError('Upgrade cancelled. Backup retained.')
+            stage('Подтверждение записи прошивки владельцем')
+            if not confirm('Все проверки пройдены. Введите ОБНОВИТЬ, чтобы записать прошивку и перезагрузить роутер,\n'
+                           'или нажмите Enter для отмены: ', 'ОБНОВИТЬ'):
+                raise DeviceError('Обновление отменено. Резервная копия сохранена.')
+            stage('Запуск обновления и перезагрузки роутера')
             command = f'(sleep 2; sysupgrade {quoted}) </dev/null >/tmp/proxys22-upgrade.log 2>&1 & echo PROXYS22_STARTED'
             if self.run(command).strip() != b'PROXYS22_STARTED':
-                raise DeviceError('Device did not confirm starting the upgrade. Check its status.')
+                raise DeviceError('Устройство не подтвердило запуск обновления. Проверьте его состояние.')
             started = True
         finally:
             if not started:

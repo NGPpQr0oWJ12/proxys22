@@ -8,6 +8,7 @@ from pathlib import Path
 import select
 import socket
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -32,11 +33,11 @@ def validate_bind(value: str, allow_loopback: bool = False) -> str:
     try:
         address = ipaddress.IPv4Address(value)
     except ipaddress.AddressValueError as exc:
-        raise ValueError("--bind must be an IPv4 address") from exc
+        raise ValueError("Параметр --bind должен содержать IPv4-адрес") from exc
     if address.is_unspecified or address.is_multicast or address.is_reserved:
-        raise ValueError("--bind must be a specific unicast IPv4 address")
+        raise ValueError("Укажите конкретный IPv4-адрес проводного адаптера в --bind")
     if address.is_loopback and not allow_loopback:
-        raise ValueError("--bind must be the wired adapter address, not loopback")
+        raise ValueError("Для --bind нужен адрес проводного адаптера; локальная петля не подходит")
     return str(address)
 
 
@@ -110,14 +111,15 @@ class RecoveryServer:
 
     def __init__(self, image: Path, bind: str, port: int = 69,
                  timeout: float = 3.0, retries: int = 5,
-                 allow_loopback: bool = False):
+                 allow_loopback: bool = False, progress=None):
         self.bind = validate_bind(bind, allow_loopback)
         if not 0 <= port <= 65535 or timeout <= 0 or retries < 0:
-            raise ValueError("Invalid port, timeout or retry count")
+            raise ValueError("Некорректный порт, время ожидания или число повторов")
         # An immutable snapshot prevents a rebuild from changing an active transfer.
         self.image = Path(image).read_bytes()
         if not self.image:
-            raise ValueError("The firmware image is empty")
+            raise ValueError("Файл прошивки пуст")
+        self.progress = progress
         self.timeout = timeout
         self.max_retries = retries
         self.stop_event = threading.Event()
@@ -145,7 +147,7 @@ class RecoveryServer:
 
     def _finish(self, message: str) -> None:
         if self.transfer:
-            LOG.info("%s: %d bytes acknowledged", message, self.transfer.offset)
+            LOG.info("%s: подтверждено %d байт", message, self.transfer.offset)
             self.transfer.sock.close()
             self.transfer = None
 
@@ -182,7 +184,9 @@ class RecoveryServer:
             channel.bind((self.bind, 0))
             channel.setblocking(False)
             self.transfer = Transfer(channel, peer, packet, block_size, 0, b"", 0)
-            LOG.info("Transfer started: %d bytes, block size %d", len(self.image), block_size)
+            LOG.info("Начата передача: %d байт, размер блока %d", len(self.image), block_size)
+            if self.progress:
+                self.progress(0, len(self.image))
             if options:
                 self.transfer.negotiating = True
                 body = b"".join(key.encode("ascii") + b"\0" + value.encode("ascii") + b"\0"
@@ -193,7 +197,7 @@ class RecoveryServer:
                 self._data()
         except OSError:
             if self.transfer:
-                self._finish("Transfer failed")
+                self._finish("Ошибка передачи")
             else:
                 channel.close()
 
@@ -204,11 +208,11 @@ class RecoveryServer:
             self._error(transfer.sock, peer, 5, "Unknown transfer ID")
             return
         if len(packet) >= 2 and struct.unpack("!H", packet[:2])[0] == ERROR:
-            self._finish("Transfer cancelled")
+            self._finish("Передача отменена")
             return
         if len(packet) != 4 or struct.unpack("!H", packet[:2])[0] != ACK:
             self._error(transfer.sock, peer, 4, "Expected acknowledgement")
-            self._finish("Invalid acknowledgement")
+            self._finish("Неверное подтверждение получения")
             return
         block = struct.unpack("!H", packet[2:])[0]
         if block != transfer.block:
@@ -220,10 +224,16 @@ class RecoveryServer:
             return
         transfer.offset += transfer.payload_size
         if transfer.payload_size < transfer.block_size:
-            self._finish("Transfer complete")
+            if self.progress:
+                self.progress(transfer.offset, len(self.image))
+            self._finish("Передача завершена")
             return
+        if self.progress and transfer.offset < len(self.image):
+            self.progress(transfer.offset, len(self.image))
         if transfer.offset - transfer.reported >= 65536:
-            LOG.info("Progress: %d bytes acknowledged", transfer.offset)
+            if not self.progress:
+                LOG.info("Передано %d из %d байт (%d%%)", transfer.offset, len(self.image),
+                         transfer.offset * 100 // len(self.image))
             transfer.reported = transfer.offset
         transfer.block = (transfer.block + 1) & 0xffff
         self._data()  # Exact block-size multiples finish with an empty DATA block.
@@ -233,17 +243,17 @@ class RecoveryServer:
         if not transfer or time.monotonic() < transfer.deadline:
             return
         if transfer.retries >= self.max_retries:
-            self._finish("Transfer timed out")
+            self._finish("Время ожидания передачи истекло")
             return
         transfer.retries += 1
         transfer.deadline = time.monotonic() + self.timeout
         try:
             transfer.sock.sendto(transfer.packet, transfer.peer)
         except OSError:
-            self._finish("Transfer failed")
+            self._finish("Ошибка передачи")
 
     def serve_forever(self) -> None:
-        LOG.info("Ready on UDP port %d; serving only KN-1112_recovery.bin", self.address[1])
+        LOG.info("Сервер готов на UDP-порту %d; доступен только KN-1112_recovery.bin", self.address[1])
         try:
             while not self.stop_event.is_set():
                 readers = [self.sock]
@@ -261,23 +271,44 @@ class RecoveryServer:
                     except BlockingIOError:
                         pass
                     except OSError:
-                        self._finish("Transfer failed")
+                        self._finish("Ошибка передачи")
                 self._timeout()
         finally:
-            self._finish("Server stopped")
+            self._finish("Сервер остановлен")
             self.sock.close()
 
 
+class RecoveryParser(argparse.ArgumentParser):
+    def format_usage(self):
+        return super().format_usage().replace('usage:', 'Использование:', 1)
+
+    def format_help(self):
+        return super().format_help().replace('usage:', 'Использование:', 1).replace('options:', 'Параметры:')
+
+    def error(self, message):
+        for original, translated in [('the following arguments are required:', 'не указаны обязательные параметры:'),
+                                     ('unrecognized arguments:', 'неизвестные параметры:'),
+                                     ('expected one argument', 'ожидается одно значение'),
+                                     ('invalid int value:', 'ожидается целое число:'), ('argument ', 'параметр ')]:
+            message = message.replace(original, translated)
+        self.print_usage(sys.stderr)
+        self.exit(2, 'Ошибка: ' + message + '\n')
+
+
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bind", required=True, help="IPv4 address of the wired PC adapter")
-    parser.add_argument("--image", required=True, type=Path, help="Verified factory .bin image")
-    parser.add_argument("--port", type=int, default=69, help="UDP port (default: 69)")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure') and not stream.isatty():
+            stream.reconfigure(encoding='utf-8', errors='replace')
+    parser = RecoveryParser(description="Сервер первичной прошивки Keenetic KN-1112", add_help=False)
+    parser.add_argument('-h', '--help', action='help', help='Показать справку и выйти')
+    parser.add_argument("--bind", required=True, help="IPv4-адрес проводного адаптера компьютера")
+    parser.add_argument("--image", required=True, type=Path, help="Проверенный образ factory .bin")
+    parser.add_argument("--port", type=int, default=69, help="Порт UDP; по умолчанию 69")
     args = parser.parse_args(argv)
     try:
         validate_bind(args.bind)
         if not 1 <= args.port <= 65535:
-            raise ValueError("--port must be between 1 and 65535")
+            raise ValueError("Порт должен быть от 1 до 65535")
         server = RecoveryServer(args.image, args.bind, args.port)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
@@ -285,7 +316,7 @@ def main(argv=None) -> int:
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        LOG.info("Stopped")
+        LOG.info("Остановлено")
     return 0
 
 

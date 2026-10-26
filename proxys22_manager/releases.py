@@ -38,42 +38,42 @@ class Release:
 
 def validate_repo(repo):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+', repo):
-        raise ReleaseError('Repository must be owner/name.')
+        raise ReleaseError('Укажите репозиторий в формате владелец/название.')
     return repo
 
 
 def asset_url(asset, repo, tag, name):
     expected = f'https://github.com/{validate_repo(repo)}/releases/download/{quote(tag, safe="")}/{quote(name, safe="")}'
     if asset.get('browser_download_url') != expected:
-        raise ReleaseError('Release asset has an unexpected download URL.')
+        raise ReleaseError('Адрес загрузки файла не соответствует репозиторию и версии выпуска.')
     return expected
 
 
 def parse_manifest(data, tag, assets, repo=DEFAULT_REPO):
     if not isinstance(data, dict) or type(data.get('schema')) is not int or data['schema'] != 1:
-        raise ReleaseError('Unsupported release manifest schema.')
+        raise ReleaseError('Формат описания выпуска не поддерживается.')
     version = data.get('version', '')
     if not isinstance(version, str) or not re.fullmatch(r'\d+\.\d+\.\d+', version) or tag != 'v' + version:
-        raise ReleaseError('Firmware version does not match the release tag.')
+        raise ReleaseError('Версия прошивки не совпадает с тегом выпуска.')
     if data.get('brand') != 'proxys22' or data.get('profile') != PROFILE or data.get('target') != TARGET:
-        raise ReleaseError('This firmware is not for proxys22 / Keenetic KN-1112.')
+        raise ReleaseError('Эта прошивка не предназначена для proxys22 на Keenetic KN-1112.')
     if not isinstance(data.get('images'), dict):
-        raise ReleaseError('Firmware images are missing from the manifest.')
+        raise ReleaseError('В описании выпуска отсутствуют образы прошивки.')
     by_name = {item.get('name'): item for item in assets if isinstance(item, dict)}
     images = {}
     for kind in ('factory', 'sysupgrade'):
         image = data['images'].get(kind)
         name = f'proxys22-{version}-{PROFILE}-{kind}.bin'
         if not isinstance(image, dict) or image.get('name') != name:
-            raise ReleaseError(f'Missing or invalid {kind} image.')
+            raise ReleaseError(f'Образ типа {kind} отсутствует или указан некорректно.')
         size, digest = image.get('size'), image.get('sha256')
         if type(size) is not int or not 0 < size <= MAX_IMAGE_BYTES:
-            raise ReleaseError('Firmware size is invalid or exceeds the device limit.')
+            raise ReleaseError('Размер прошивки указан некорректно или превышает лимит устройства.')
         if not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest):
-            raise ReleaseError('Invalid firmware SHA-256.')
+            raise ReleaseError('Контрольная сумма SHA-256 прошивки указана некорректно.')
         asset = by_name.get(name)
         if asset is None or type(asset.get('size')) is not int or asset['size'] != size:
-            raise ReleaseError(f'{kind} asset is missing or its size does not match.')
+            raise ReleaseError(f'Файл типа {kind} отсутствует в выпуске или его размер не совпадает с описанием.')
         images[kind] = FirmwareImage(kind, name, size, digest, asset_url(asset, repo, tag, name))
     return Release(version, tag, images)
 
@@ -81,13 +81,13 @@ def parse_manifest(data, tag, assets, repo=DEFAULT_REPO):
 def verify_image(path, image):
     path = Path(path)
     if not path.is_file() or path.stat().st_size != image.size:
-        raise ReleaseError('Firmware file size does not match the release manifest.')
+        raise ReleaseError('Размер файла прошивки не совпадает с описанием выпуска.')
     digest = hashlib.sha256()
     with path.open('rb') as source:
         for block in iter(lambda: source.read(65536), b''):
             digest.update(block)
     if digest.hexdigest() != image.sha256:
-        raise ReleaseError('Firmware SHA-256 verification failed.')
+        raise ReleaseError('Контрольная сумма SHA-256 прошивки не совпадает с описанием выпуска.')
 
 
 class Catalog:
@@ -104,59 +104,65 @@ class Catalog:
         with self._open(url) as response:
             body = response.read(limit + 1)
         if len(body) > limit:
-            raise ReleaseError('Release metadata is too large.')
+            raise ReleaseError('Размер описания выпуска превышает допустимый предел.')
         try:
             return json.loads(body)
         except (ValueError, UnicodeError) as exc:
-            raise ReleaseError('Invalid release metadata.') from exc
+            raise ReleaseError('Не удалось прочитать описание выпуска: данные повреждены или имеют неверный формат.') from exc
 
     def load(self, tag=None):
         if tag is not None and not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
-            raise ReleaseError('Release tag must use vMAJOR.MINOR.PATCH.')
+            raise ReleaseError('Тег выпуска должен иметь вид v0.4.0: три числа, разделённые точками.')
         endpoint = 'latest' if tag is None else 'tags/' + quote(tag, safe='')
         try:
             release = self._json(f'https://api.github.com/repos/{self.repo}/releases/{endpoint}', 2 * 1024 * 1024)
             if not isinstance(release, dict) or release.get('draft') or release.get('prerelease'):
-                raise ReleaseError('A published stable release is required.')
+                raise ReleaseError('Нужен опубликованный стабильный выпуск прошивки.')
             release_tag = release.get('tag_name', '')
             if not isinstance(release_tag, str) or not re.fullmatch(r'v\d+\.\d+\.\d+', release_tag):
-                raise ReleaseError('Unexpected release tag.')
+                raise ReleaseError('Тег выпуска имеет неподдерживаемый формат.')
             if tag is not None and release_tag != tag:
-                raise ReleaseError('GitHub returned a different release than the requested tag.')
+                raise ReleaseError('GitHub вернул другой выпуск вместо запрошенного тега.')
             assets = release.get('assets', [])
             if not isinstance(assets, list):
-                raise ReleaseError('Release assets are missing.')
+                raise ReleaseError('В выпуске отсутствует список файлов.')
             matches = [asset for asset in assets if isinstance(asset, dict) and asset.get('name') == MANIFEST_NAME]
             if len(matches) != 1:
-                raise ReleaseError('The release does not contain proxys22-release.json.')
+                raise ReleaseError('В выпуске должен быть ровно один файл proxys22-release.json.')
             url = asset_url(matches[0], self.repo, release_tag, MANIFEST_NAME)
             return parse_manifest(self._json(url, 65536), release_tag, assets, self.repo)
         except OSError as exc:
-            raise ReleaseError('Cannot download the public GitHub release. Check Internet access and API rate limits.') from exc
+            raise ReleaseError('Не удалось загрузить выпуск с GitHub. Проверьте подключение к интернету и лимиты API.') from exc
 
-    def download(self, release, kind, directory):
+    def download(self, release, kind, directory, progress=None):
         if kind not in ('factory', 'sysupgrade'):
-            raise ReleaseError('Image type must be factory or sysupgrade.')
+            raise ReleaseError('Укажите тип образа: factory или sysupgrade.')
         image = release.images[kind]
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         destination = directory / image.name
         if destination.exists():
             verify_image(destination, image)
+            if progress:
+                progress(image.size, image.size)
             return destination
         descriptor, temporary = tempfile.mkstemp(prefix='.firmware-', suffix='.part', dir=directory)
         try:
             with os.fdopen(descriptor, 'wb') as output, self._open(image.url) as response:
+                if progress:
+                    progress(0, image.size)
                 count = 0
                 while block := response.read(65536):
                     count += len(block)
                     if count > image.size:
-                        raise ReleaseError('Downloaded firmware exceeds the manifest size.')
+                        raise ReleaseError('Загружаемый файл прошивки превышает размер, указанный в описании выпуска.')
                     output.write(block)
+                    if progress:
+                        progress(count, image.size)
             verify_image(temporary, image)
             os.replace(temporary, destination)
         except OSError as exc:
-            raise ReleaseError('Firmware download failed; no unverified image was installed.') from exc
+            raise ReleaseError('Загрузка прошивки не удалась. Непроверенный образ не был установлен.') from exc
         finally:
             Path(temporary).unlink(missing_ok=True)
         return destination

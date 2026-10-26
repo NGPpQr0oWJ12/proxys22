@@ -48,11 +48,11 @@ class RecoveryTests(unittest.TestCase):
         self.temp.cleanup()
         self.assertEqual(self.errors, [])
 
-    def start(self, body, timeout=0.08, retries=2):
+    def start(self, body, timeout=0.08, retries=2, progress=None):
         self.image.write_bytes(body)
         self.server = recovery.RecoveryServer(
             self.image, "127.0.0.1", port=0, timeout=timeout,
-            retries=retries, allow_loopback=True)
+            retries=retries, allow_loopback=True, progress=progress)
 
         def run():
             try:
@@ -116,6 +116,31 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(received, body)
         self.assertEqual([len(packet) - 4 for packet in packets], [512, 512, 260])
         self.assertEqual(options, {})
+
+    def test_progress_counts_only_acknowledged_bytes(self):
+        updates = []
+        completed = threading.Event()
+
+        def progress(count, total):
+            updates.append((count, total))
+            if count == total:
+                completed.set()
+
+        self.start(b'x' * 1024, progress=progress)
+        client = self.client()
+        client.sendto(request(), self.server.address)
+        _, peer = client.recvfrom(65536)
+        self.assertEqual(updates, [(0, 1024)])
+        client.sendto(ack(1), peer)
+        client.recvfrom(65536)
+        self.assertEqual(updates[-1], (512, 1024))
+        client.sendto(ack(2), peer)
+        final, _ = client.recvfrom(65536)
+        self.assertEqual(len(final), 4)
+        self.assertFalse(completed.is_set())
+        client.sendto(ack(3), peer)
+        self.assertTrue(completed.wait(1))
+        self.assertEqual(updates[-1], (1024, 1024))
 
     def test_exact_multiple_requires_final_empty_block(self):
         body = b"x" * 1024

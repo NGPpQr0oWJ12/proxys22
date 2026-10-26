@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from proxys22_manager.releases import (
     DEFAULT_REPO,
@@ -352,6 +353,66 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual(result, final)
             self.assertEqual(final.read_bytes(), PAYLOAD)
             self.assertEqual(opener.calls, [])
+
+    def test_download_progress_counts_written_bytes_and_starts_at_zero(self):
+        class ChunkedResponse(Response):
+            def read(self, size=-1):
+                return super().read(min(size, 5))
+
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            final = directory / self.image.name
+            progress = []
+            opener = FakeOpener({self.image.url: lambda: ChunkedResponse(PAYLOAD)})
+
+            def record(done, total):
+                self.assertFalse(final.exists())
+                progress.append((done, total))
+
+            Catalog(opener=opener).download(self.release, "factory", directory, progress=record)
+            self.assertEqual(progress[0], (0, len(PAYLOAD)))
+            self.assertEqual(progress[-1], (len(PAYLOAD), len(PAYLOAD)))
+            self.assertEqual([done for done, _ in progress], list(range(0, len(PAYLOAD), 5)) + [len(PAYLOAD)])
+            self.assertTrue(all(total == len(PAYLOAD) for _, total in progress))
+            self.assertEqual(final.read_bytes(), PAYLOAD)
+
+    def test_cached_completion_is_reported_only_after_checksum_verification(self):
+        for valid in (True, False):
+            with self.subTest(valid=valid), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp)
+                final = directory / self.image.name
+                final.write_bytes(PAYLOAD if valid else b"x" * len(PAYLOAD))
+                events = []
+                original_verify = verify_image
+
+                def checked_verify(path, image):
+                    original_verify(path, image)
+                    events.append("verified")
+
+                with patch("proxys22_manager.releases.verify_image", side_effect=checked_verify):
+                    action = lambda: Catalog(opener=FakeOpener({})).download(
+                        self.release, "factory", directory,
+                        progress=lambda done, total: events.append((done, total)),
+                    )
+                    if valid:
+                        self.assertEqual(action(), final)
+                        self.assertEqual(events, ["verified", (len(PAYLOAD), len(PAYLOAD))])
+                    else:
+                        with self.assertRaises(ReleaseError):
+                            action()
+                        self.assertEqual(events, [])
+
+    def test_truncated_download_progress_never_reaches_total(self):
+        with tempfile.TemporaryDirectory() as temp:
+            progress = []
+            opener = FakeOpener({self.image.url: PAYLOAD[:-1]})
+            with self.assertRaises(ReleaseError):
+                Catalog(opener=opener).download(
+                    self.release, "factory", Path(temp),
+                    progress=lambda done, total: progress.append((done, total)),
+                )
+            self.assertEqual(progress, [(0, len(PAYLOAD)), (len(PAYLOAD) - 1, len(PAYLOAD))])
+            self.assertEqual(list(Path(temp).iterdir()), [])
 
     def test_unknown_image_kind_cannot_make_a_network_request(self):
         with tempfile.TemporaryDirectory() as temp:

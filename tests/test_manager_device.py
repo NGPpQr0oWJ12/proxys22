@@ -1,14 +1,17 @@
 """Device upgrade safeguards exercised with fake SSH and in-memory backups."""
 
 import copy
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 from pathlib import Path
 import shlex
+import sys
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from proxys22_manager.device import DeviceError, Router, validate_board, verify_backup
 from proxys22_manager.releases import FirmwareImage, ReleaseError
@@ -71,7 +74,7 @@ class FakeRouter(Router):
         self.events.append("backup-verified")
         return result
 
-    def run(self, command, data=None, timeout=30, limit=2 * 1024 * 1024):
+    def run(self, command, data=None, timeout=30, limit=2 * 1024 * 1024, progress=None):
         self.commands.append(command)
         if command.startswith("for f in "):
             self.events.append("existing-files")
@@ -84,6 +87,9 @@ class FakeRouter(Router):
             self.uploaded = data
             if self.upload_error:
                 raise DeviceError("Fixture upload failed")
+            if progress:
+                progress(0, len(data))
+                progress(len(data), len(data))
             return b""
         if command.startswith("sha256sum "):
             self.events.append("remote-hash")
@@ -182,8 +188,8 @@ class UpgradeTests(unittest.TestCase):
 
     def confirm(self, prompt, expected):
         self.router.events.append("confirm")
-        self.assertEqual(expected, "UPDATE")
-        self.assertIn("UPDATE", prompt)
+        self.assertEqual(expected, "ОБНОВИТЬ")
+        self.assertIn("ОБНОВИТЬ", prompt)
         self.assertIsNotNone(self.router.saved_backup)
         self.assertTrue(self.router.saved_backup.is_file())
         self.assertLess(self.router.events.index("backup-verified"), self.router.events.index("remote-hash"))
@@ -227,6 +233,26 @@ class UpgradeTests(unittest.TestCase):
         with self.assertRaises(DeviceError):
             self.upgrade(image=image)
         self.assertEqual(self.router.events, [])
+
+    def test_seven_russian_stages_precede_their_real_operations(self):
+        messages = []
+        progress_events = []
+
+        def stage(message):
+            messages.append(message)
+            self.router.events.append(f"stage-{len(messages)}")
+
+        self.router.on_stage = stage
+        self.router.progress = lambda done, total: progress_events.append((done, total))
+        self.upgrade()
+        self.assertEqual(len(messages), 7)
+        for message in messages:
+            self.assertRegex(message, "[А-Яа-яЁё]")
+        operations = ("board", "backup-command", "upload", "remote-hash", "compatibility", "confirm", "flash")
+        for number, operation in enumerate(operations, 1):
+            self.assertLess(self.router.events.index(f"stage-{number}"), self.router.events.index(operation))
+        self.assertLess(self.router.events.index("backup-verified"), self.router.events.index("stage-3"))
+        self.assertEqual(progress_events, [(0, len(PAYLOAD)), (len(PAYLOAD), len(PAYLOAD))])
 
     def test_wrong_local_hash_or_size_is_rejected_before_device_access(self):
         for payload in (PAYLOAD[:-1], b"x" * len(PAYLOAD)):
@@ -320,6 +346,125 @@ class UpgradeTests(unittest.TestCase):
         self.assertNotIn("remote-hash", self.router.events)
         self.assert_no_flash()
         self.assertFalse(self.confirmed)
+
+
+class UploadProgressTests(unittest.TestCase):
+    def router_and_channel(self):
+        channel = Mock()
+        channel.recv_ready.return_value = False
+        channel.recv_stderr_ready.return_value = False
+        channel.exit_status_ready.return_value = True
+        channel.recv_exit_status.return_value = 0
+        transport = Mock()
+        transport.is_active.return_value = True
+        transport.open_session.return_value = channel
+        router = Router("fixture.invalid")
+        router.client = Mock()
+        router.client.get_transport.return_value = transport
+        return router, channel
+
+    def test_actual_upload_bytes_are_reported_in_bounded_chunks(self):
+        router, channel = self.router_and_channel()
+        payload = b"x" * (2 * 65536 + 7)
+        progress = []
+        sent = []
+        channel.sendall.side_effect = sent.append
+
+        def record(done, total):
+            self.assertEqual(done, sum(map(len, sent)))
+            progress.append((done, total))
+
+        self.assertEqual(router.run("cat >/tmp/fixture", payload, progress=record), b"")
+        self.assertEqual(b"".join(sent), payload)
+        self.assertTrue(all(len(block) <= 65536 for block in sent))
+        self.assertEqual(progress, [(0, len(payload)), (65536, len(payload)),
+                                    (131072, len(payload)), (len(payload), len(payload))])
+        channel.shutdown_write.assert_called_once()
+        channel.close.assert_called_once()
+
+    def test_failed_upload_never_reports_unaccepted_chunk_as_transferred(self):
+        router, channel = self.router_and_channel()
+        progress = []
+        payload = b"x" * (2 * 65536)
+        channel.sendall.side_effect = [None, OSError("fixture interruption")]
+        with self.assertRaises(DeviceError):
+            router.run("cat >/tmp/fixture", payload,
+                       progress=lambda done, total: progress.append((done, total)))
+        self.assertEqual(progress, [(0, len(payload)), (65536, len(payload))])
+        channel.close.assert_called_once()
+
+
+class SSHTrustTests(unittest.TestCase):
+    def fake_paramiko(self, changed_key=False):
+        class SSHException(Exception):
+            pass
+
+        class BadHostKeyException(SSHException):
+            pass
+
+        class AuthenticationException(SSHException):
+            pass
+
+        class PasswordRequiredException(SSHException):
+            pass
+
+        client = Mock()
+        policy = []
+        client.set_missing_host_key_policy.side_effect = policy.append
+        key = Mock()
+        key.asbytes.return_value = b"fixture public key"
+        key.get_name.return_value = "ssh-ed25519"
+
+        def connect(host, **kwargs):
+            if changed_key:
+                raise BadHostKeyException("fixture changed key")
+            policy[-1].missing_host_key(client, host, key)
+
+        client.connect.side_effect = connect
+        paramiko = SimpleNamespace(
+            MissingHostKeyPolicy=object, SSHClient=lambda: client,
+            SSHException=SSHException, BadHostKeyException=BadHostKeyException,
+            AuthenticationException=AuthenticationException,
+            PasswordRequiredException=PasswordRequiredException,
+        )
+        return paramiko, client
+
+    def test_explicit_russian_trust_saves_key_without_running_commands(self):
+        paramiko, client = self.fake_paramiko()
+        output, prompts = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"paramiko": paramiko}), \
+                redirect_stdout(output), redirect_stderr(prompts), \
+                patch("builtins.input", return_value=" доверяю "):
+            with Router("fixture.invalid", state_dir=temp):
+                pass
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("ДОВЕРЯЮ", prompts.getvalue())
+        self.assertIn("не запускает запись прошивки", prompts.getvalue())
+        client.get_host_keys.return_value.add.assert_called_once()
+        client.save_host_keys.assert_called_once()
+        client.get_transport.assert_not_called()
+
+    def test_enter_or_unrelated_confirmation_never_saves_unknown_key(self):
+        for answer in ("", "да", "ОБНОВИТЬ"):
+            with self.subTest(answer=answer):
+                paramiko, client = self.fake_paramiko()
+                with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"paramiko": paramiko}), \
+                        patch("builtins.print"), patch("builtins.input", return_value=answer):
+                    with self.assertRaises(DeviceError):
+                        Router("fixture.invalid", state_dir=temp).__enter__()
+                client.save_host_keys.assert_not_called()
+                client.get_transport.assert_not_called()
+                client.close.assert_called_once()
+
+    def test_changed_key_is_refused_without_offering_to_replace_it(self):
+        paramiko, client = self.fake_paramiko(changed_key=True)
+        with tempfile.TemporaryDirectory() as temp, patch.dict(sys.modules, {"paramiko": paramiko}), \
+                patch("builtins.input") as prompt:
+            with self.assertRaisesRegex(DeviceError, "Ключ SSH устройства изменился"):
+                Router("fixture.invalid", state_dir=temp).__enter__()
+        prompt.assert_not_called()
+        client.save_host_keys.assert_not_called()
+        client.get_transport.assert_not_called()
 
 
 if __name__ == "__main__":
