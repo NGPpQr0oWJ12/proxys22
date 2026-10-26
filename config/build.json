@@ -1,6 +1,6 @@
 {
   "brand": "proxys22",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "source_date_epoch": 1792972800,
   "openwrt": {
     "version": "25.12.2",

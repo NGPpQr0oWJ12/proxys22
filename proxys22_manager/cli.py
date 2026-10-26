@@ -92,6 +92,25 @@ def router(args):
                   on_stage=stage, progress=console.progress('Передача на роутер'))
 
 
+def show_identity(identity):
+    console.panel('ОПРЕДЕЛЁН ПОДКЛЮЧЁННЫЙ РОУТЕР', [
+        'Модель: ' + identity['model'], 'Идентификатор платы: ' + identity['board_name'],
+        'Платформа: ' + (identity['target'] or 'Не определена'),
+        'Совместимая сборка: ' + (identity['profile'] or 'Отсутствует')])
+    if identity.get('cpu'):
+        console.line('  ЦП: ' + identity['cpu'])
+    if not identity['supported']:
+        console.warning('Для определённой модели нет совместимой сборки proxys22. Запись запрещена.')
+
+
+def identify_router(device):
+    identity = device.identify()
+    show_identity(identity)
+    if not identity['supported']:
+        raise DeviceError('Модель или платформа не поддерживается. Образ для другого роутера не будет скачан или записан.')
+    return identity
+
+
 def show_diagnostics(values):
     translations = {'ethernet': 'Ethernet (кабель)', 'wifi': 'Wi-Fi', 'direct': 'Напрямую',
                     'proxy': 'Через туннель', 'amneziawg': 'AmneziaWG', 'hysteria': 'Hysteria 2',
@@ -148,6 +167,11 @@ def run_command(args):
         recovery.validate_bind(args.bind)
         if not 1 <= args.port <= 65535:
             raise ValueError('Порт TFTP должен быть от 1 до 65535.')
+        if getattr(args, 'host', None):
+            with router(args) as device:
+                identify_router(device)
+        else:
+            console.warning('Модель через SSH не проверена. В режиме загрузчика нельзя достоверно определить аппаратную ревизию: сверьте наклейку KN-1112.')
         release, path = prepare_image(args, 'factory')
         console.panel('ПЕРВИЧНАЯ ПРОШИВКА / ВОССТАНОВЛЕНИЕ', [
             'Поддерживается только Keenetic Start KN-1112.',
@@ -191,6 +215,13 @@ def run_command(args):
             recovery.LOG.setLevel(previous_level)
             recovery.LOG.propagate = previous_propagate
             console.end_progress()
+    elif args.command == 'detect':
+        with router(args) as device:
+            identity = device.identify()
+        if args.json:
+            print(json.dumps(identity, ensure_ascii=False, indent=2))
+        else:
+            show_identity(identity)
     elif args.command == 'diagnose':
         with router(args) as device:
             values = device.diagnostics()
@@ -205,9 +236,10 @@ def run_command(args):
         console.success('Архив резервной копии проверен.')
         console.line('Закрытая копия: ' + str(path))
     elif args.command == 'update':
-        release, path = prepare_image(args, 'sysupgrade')
         with router(args) as device:
+            identify_router(device)
             current = device.firmware().get('version', 'неизвестно')
+            release, path = prepare_image(args, 'sysupgrade')
             console.panel('ПОДГОТОВКА ОБНОВЛЕНИЯ', [f'Установлена версия: {current}',
                 f'Выбрана версия: {release.version}', 'Настройки и профили сохраняются.',
                 'Запись начнётся после всех проверок и отдельного подтверждения ОБНОВИТЬ.'])
@@ -290,15 +322,20 @@ def parser():
     flash.add_argument('--bind', required=True, help='IPv4-адрес проводного адаптера компьютера')
     flash.add_argument('--port', type=int, default=69, help='Порт TFTP; по умолчанию 69')
     flash.add_argument('--image', type=Path, help='Проверить и использовать локальный образ factory')
-    for name in ('diagnose', 'backup', 'update'):
+    flash.add_argument('--host', help='Адрес работающего OpenWrt для проверки модели по SSH перед первичной прошивкой')
+    flash.add_argument('--ssh-port', type=int, default=22, help='Порт SSH для определения модели; по умолчанию 22')
+    flash.add_argument('--user', default='root', help='Пользователь SSH; по умолчанию root')
+    flash.add_argument('--identity', type=Path, help='Локальный закрытый ключ SSH')
+    for name in ('detect', 'diagnose', 'backup', 'update'):
         command = sub.add_parser(name, help={'diagnose': 'Диагностика устройства',
+                                           'detect': 'Определить модель и совместимость без прошивки',
                                            'backup': 'Закрытая резервная копия настроек',
                                            'update': 'Резервная копия, проверка и обновление прошивки'}[name])
         command.add_argument('--host', required=True, help='IP-адрес или имя роутера')
         command.add_argument('--ssh-port', type=int, default=22, help='Порт SSH; по умолчанию 22')
         command.add_argument('--user', default='root', help='Пользователь SSH; по умолчанию root')
         command.add_argument('--identity', type=Path, help='Локальный закрытый ключ SSH')
-        if name == 'diagnose':
+        if name in ('detect', 'diagnose'):
             command.add_argument('--json', action='store_true', help='Исходный машинный отчёт в формате JSON')
         if name == 'backup':
             command.add_argument('--output', type=Path, help='Каталог для закрытой резервной копии')
@@ -325,21 +362,21 @@ def describe_error(error):
 
 def menu(args):
     while True:
-        console.panel(f'proxys22 {VERSION}', ['Keenetic Start KN-1112', 'Прошивка · Обновление · Диагностика'])
+        console.panel(f'proxys22 {VERSION}', ['Прошивка · Обновление · Диагностика', 'Модель определяется по SSH перед обновлением'])
         for row in ['  1  Последняя стабильная прошивка', '  2  Скачать и проверить образ',
                     '  3  Первичная прошивка / восстановление', '  4  Обновить прошивку роутера',
                     '  5  Диагностика роутера', '  6  Резервная копия настроек',
-                    '  7  Проверить этот компьютер', '', '  0  Выход']:
+                    '  7  Проверить этот компьютер', '  8  Определить подключённый роутер', '', '  0  Выход']:
             console.line(row)
         choice = console.prompt('Выберите действие')
         if choice == '0':
             return
-        if choice not in ('1', '2', '3', '4', '5', '6', '7'):
-            console.warning('Введите номер действия от 0 до 7.')
+        if choice not in ('1', '2', '3', '4', '5', '6', '7', '8'):
+            console.warning('Введите номер действия от 0 до 8.')
             continue
         selected = argparse.Namespace(**vars(args))
         selected.command = {'1': 'releases', '2': 'download', '3': 'flash', '4': 'update',
-                            '5': 'diagnose', '6': 'backup', '7': 'doctor'}[choice]
+                            '5': 'diagnose', '6': 'backup', '7': 'doctor', '8': 'detect'}[choice]
         selected.output = selected.image = selected.backup_dir = None
         selected.reinstall = selected.online = selected.json = False
         if choice == '2':
@@ -351,7 +388,9 @@ def menu(args):
         if choice == '3':
             selected.bind = console.prompt('IPv4-адрес проводного адаптера компьютера', '192.168.1.2')
             selected.port = 69
-        if choice in ('4', '5', '6'):
+            selected.host = console.prompt('Адрес работающего OpenWrt для проверки модели (Enter — только загрузчик)')
+            selected.ssh_port, selected.user, selected.identity = 22, 'root', None
+        if choice in ('4', '5', '6', '8'):
             selected.host = console.prompt('Адрес роутера', '192.168.2.1')
             selected.ssh_port, selected.user, selected.identity = 22, 'root', None
         try:
@@ -375,8 +414,8 @@ def main(argv=None):
         if args.command in (None, 'menu'):
             menu(args)
         else:
-            if not (args.command == 'diagnose' and args.json):
-                console.panel(f'proxys22 {VERSION}', ['Keenetic Start KN-1112'])
+            if not (args.command in ('detect', 'diagnose') and args.json):
+                console.panel(f'proxys22 {VERSION}', ['Прошивка · Обновление · Диагностика'])
             run_command(args)
         return 0
     except (ReleaseError, DeviceError, OSError, ValueError) as exc:

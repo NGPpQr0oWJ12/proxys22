@@ -170,6 +170,8 @@ class RecoveryServer:
         try:
             block_size, options = parse_request(packet, len(self.image))
         except RequestError as exc:
+            if exc.code == 1:
+                LOG.warning('Имя образа в запросе загрузчика не соответствует KN-1112. Передача прошивки запрещена.')
             self._error(self.sock, peer, exc.code, str(exc))
             return
         if self.transfer:
@@ -179,6 +181,7 @@ class RecoveryServer:
                 self._error(self.sock, peer, 0, "A transfer is already active")
             return
 
+        LOG.info('Загрузчик запросил KN-1112_recovery.bin: выбран профиль Keenetic KN-1112. Аппаратную ревизию проверяют по наклейке.')
         channel = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             channel.bind((self.bind, 0))

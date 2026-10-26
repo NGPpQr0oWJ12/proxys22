@@ -17,7 +17,7 @@ import time
 import uuid
 import zlib
 
-from .releases import FirmwareImage, TARGET, verify_image
+from .releases import FirmwareImage, PROFILE, TARGET, verify_image
 
 
 class DeviceError(RuntimeError):
@@ -35,8 +35,30 @@ def private_file(path, body):
 def validate_board(board):
     if not isinstance(board, dict) or board.get('board_name') != 'keenetic,kn-1112':
         raise DeviceError('Модель устройства не соответствует Keenetic KN-1112. Запись прошивки запрещена.')
-    if board.get('release', {}).get('target') != TARGET:
+    release = board.get('release')
+    if not isinstance(release, dict) or release.get('target') != TARGET:
         raise DeviceError('Платформа OpenWrt не соответствует ожидаемой. Запись прошивки запрещена.')
+
+
+def identify_board(board):
+    if not isinstance(board, dict) or not isinstance(board.get('board_name'), str) or not board['board_name'].strip():
+        raise DeviceError('Устройство не сообщает идентификатор платы. Автоопределение модели невозможно; запись запрещена.')
+
+    def label(value):
+        return ''.join(character for character in value if character.isprintable())[:160] if isinstance(value, str) else ''
+
+    release = board.get('release') if isinstance(board.get('release'), dict) else {}
+    identity = {'model': label(board.get('model')) or label(board['board_name']),
+                'board_name': label(board['board_name']), 'target': label(release.get('target')),
+                'cpu': label(board.get('system')), 'openwrt': label(release.get('version')),
+                'supported': False, 'profile': None}
+    try:
+        validate_board(board)
+    except DeviceError as exc:
+        identity['reason'] = str(exc)
+    else:
+        identity.update(model='Keenetic Start KN-1112', supported=True, profile=PROFILE, reason='Совместимая сборка доступна.')
+    return identity
 
 
 def verify_backup(body, required):
@@ -178,13 +200,22 @@ class Router:
         finally:
             channel.close()
 
-    def board(self):
+    def _read_board(self):
         try:
             board = json.loads(self.run('ubus call system board'))
-            validate_board(board)
-            return board
         except (ValueError, TypeError) as exc:
             raise DeviceError('Не удалось определить модель устройства через OpenWrt ubus.') from exc
+        if not isinstance(board, dict):
+            raise DeviceError('Устройство не сообщает данные о модели через OpenWrt ubus.')
+        return board
+
+    def identify(self):
+        return identify_board(self._read_board())
+
+    def board(self):
+        board = self._read_board()
+        validate_board(board)
+        return board
 
     def firmware(self):
         try:
