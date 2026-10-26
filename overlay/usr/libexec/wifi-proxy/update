@@ -1,0 +1,28 @@
+#!/bin/sh
+# Fixed actions only. The RPC module owns the private directory and job lock.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+ROOT=/tmp/proxys22-update
+case "$1" in
+	start-check|start-prepare|start-apply)
+		mode=${1#start-}
+		/usr/bin/ucode -e 'import { run_update } from "/usr/share/wifi-proxy/update.uc"; exit(run_update(ARGV));' -- "$mode" </dev/null >/dev/null 2>&1 &
+		;;
+	backup) /sbin/sysupgrade -b "$ROOT/backup.tar.gz" >/dev/null 2>&1 ;;
+	settings-hash)
+		for file in /etc/config/network /etc/config/wireless /etc/wifi-proxy/initialized /etc/wifi-proxy/client.json /etc/wifi-proxy/awg.json; do
+			if [ -f "$file" ]; then /usr/bin/sha256sum "$file" || exit 1; fi
+		done
+		;;
+	verify-backup)
+		/bin/gzip -t "$ROOT/backup.tar.gz" >/dev/null 2>&1 &&
+		/bin/tar -tvzf "$ROOT/backup.tar.gz" > "$ROOT/backup.list" 2>/dev/null
+		;;
+	test-image) /sbin/sysupgrade -T "$ROOT/image.bin" >/dev/null 2>&1 ;;
+	flash)
+		/bin/sleep 2
+		exec /sbin/sysupgrade "$ROOT/image.bin" >/dev/null 2>&1
+		;;
+	*) exit 1 ;;
+esac

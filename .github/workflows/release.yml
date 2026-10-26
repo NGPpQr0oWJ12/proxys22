@@ -24,6 +24,8 @@ jobs:
       - run: python -m pip install -r requirements-manager.txt
       - run: python -m unittest discover -s tests -p "test_*.py"
       - run: node --check overlay/www/assets/app.js
+      - run: node --check overlay/www/assets/update.js
+      - run: node --test tests/web-update.test.cjs
       - run: python proxys22.py doctor
 
   manager:
@@ -56,7 +58,7 @@ jobs:
       - name: Install OpenWrt build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync swig unzip zlib1g-dev file wget zstd curl ca-certificates
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync swig unzip zlib1g-dev file wget zstd curl ca-certificates cmake pkg-config libjson-c-dev qemu-user-static
           sudo mkdir -p /opt/wifi-proxy
           sudo chown "$USER:$USER" /opt/wifi-proxy
       - name: Verify tag and build versions
@@ -70,6 +72,10 @@ jobs:
           assert os.environ['GITHUB_REF_NAME'] == 'v' + VERSION == 'v' + config['version'] == 'v' + firmware['version']
           PY
       - run: bash scripts/build-firmware.sh
+      - name: Validate built firmware and web updater
+        run: |
+          sudo bash scripts/validate-runtime.sh
+          sudo bash scripts/validate-web-update.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware

@@ -8,8 +8,10 @@
   const sessionKey = 'proxys22.session';
   let session = '', requestId = 0, refreshId = 0, busy = false, seeded = false, scanning = false, status = null;
   let networks = [], history = [], deviceButtons = [], demoStep = 0, demoEpoch = Math.floor(Date.now() / 1000);
+  let scanLoaded = false, scanMessage = '';
+  let firmwareUpdater = null;
   const demoStatus = {
-    system: { model: 'KN-1112', version: '0.4.1', firmware: 'proxys22 0.4.1', uptime: 98124 },
+    system: { model: 'KN-1112', version: '0.5.0', firmware: 'proxys22 0.5.0', uptime: 98124 },
     tunnel: { protocol: 'amneziawg', configured: true, enabled: true, running: true, mode: demoFallback ? 'direct' : 'proxy', healthy: !demoFallback, reason: demoFallback ? 'unavailable' : 'healthy' },
     uplink: { mode: 'ethernet', connected: true }, wifi: { ssid: 'Home Network' },
     devices: [
@@ -55,10 +57,12 @@
     } catch (_) {}
   }
   function showLogin() {
-    setSession(''); status = null; seeded = false; scanning = false; history = []; networks = [];
+    setSession(''); status = null; seeded = false; scanning = false; history = []; networks = []; scanLoaded = false; scanMessage = '';
+    firmwareUpdater?.reset();
     clearSecrets(); closePaste();
     for (const id of ['login-error', 'status-error', 'proxy-error', 'internet-error', 'wifi-error', 'paste-error', 'devices-error']) errorAt(id);
     $('upstream-network').value = ''; $('upstream-fields').hidden = true;
+    $('network-picker').hidden = true; $('change-uplink').setAttribute('aria-expanded', 'false');
     $('topbar').hidden = true;
     $('dashboard').hidden = true;
     $('login-view').hidden = false;
@@ -69,7 +73,8 @@
     $('topbar').hidden = false;
     $('dashboard').hidden = false;
     $('demo-badge').hidden = !demo;
-    scanNetworks();
+    renderInternet();
+    firmwareUpdater?.consider();
   }
   function safeMessage(error, secrets = []) {
     let message = error.message || 'Не удалось выполнить запрос.';
@@ -84,10 +89,10 @@
     }
     return message.replace(/(?:hy2|hysteria2):\/\/\S+/gi, '[скрытая ссылка]').slice(0, 250);
   }
-  async function rpc(object, method, args, token = session) {
+  async function rpc(object, method, args, token = session, timeout = 15000) {
     if (demo) throw new Error('Сетевые запросы отключены в деморежиме.');
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
       const response = await fetch('/ubus', {
         method: 'POST', credentials: 'same-origin', cache: 'no-store',
@@ -111,7 +116,7 @@
         throw Object.assign(new Error('Команда недоступна на этой версии роутера.'), { code: data.result[0] });
       }
       const result = data.result[1] || {};
-      if (result.ok === false || result.error) throw new Error(result.message || 'Настройки не применены.');
+      if (result.ok === false || result.error) throw Object.assign(new Error(result.message || 'Настройки не применены.'), { rejected: true });
       return result;
     } catch (error) {
       if (error.name === 'AbortError') throw new Error('Роутер не ответил. Проверьте подключение к его сети.');
@@ -127,18 +132,41 @@
     $('upstream-fields').hidden = !network;
     $('upstream-password-field').hidden = !secured(network);
     $('upstream-password').required = !!secured(network);
-    $('upstream-password').disabled = busy || !secured(network);
+    $('upstream-password').disabled = busy || scanning || !secured(network);
+    $('upstream-connect').disabled = busy || scanning || !network;
+  }
+  function renderNetworkPicker() {
+    $('scan-refresh').disabled = busy || scanning;
+    $('scan-refresh').textContent = scanning ? 'Ищем…' : scanMessage ? 'Повторить поиск' : 'Обновить список';
+    $('upstream-network').disabled = busy || scanning || !networks.length;
+    $('uplink-form').hidden = !networks.length;
+    $('scan-note').textContent = scanning ? 'Ищем доступные сети…' : scanMessage && networks.length ? 'Показан предыдущий список сетей.' : scanLoaded ? networks.length ? `Найдено сетей: ${networks.length}` : 'Сети не найдены. Попробуйте обновить список.' : 'Поиск выполняется по вашему запросу.';
+    errorAt('scan-message', scanMessage);
+    updateNetworkFields();
+  }
+  function renderInternet() {
+    const uplink = status?.uplink || {}, wifi = uplink.mode === 'wifi', known = typeof uplink.connected === 'boolean';
+    $('uplink-state').textContent = !known ? 'Нет данных' : uplink.connected ? 'Подключено' : 'Нет подключения';
+    $('uplink-state').className = 'connection-badge' + (!known ? '' : uplink.connected ? ' connected' : ' disconnected');
+    $('uplink-type').textContent = wifi ? 'Источник · Wi-Fi' : uplink.mode === 'ethernet' ? 'Источник · Ethernet' : 'Источник Интернета';
+    $('active-uplink-name').textContent = wifi ? uplink.ssid || 'Сеть Wi-Fi' : uplink.mode === 'ethernet' ? 'Кабель Ethernet' : 'Состояние неизвестно';
+    $('uplink-description').textContent = !known ? 'Ожидаем данные от роутера.' : uplink.connected ? 'Текущее подключение активно.' : wifi ? 'Не удалось подключиться к выбранной сети.' : 'Проверьте подключение кабеля к порту WAN.';
+    $('uplink-disconnect').hidden = !wifi;
+    $('change-uplink').textContent = !$('network-picker').hidden ? 'Скрыть список' : wifi ? 'Сменить сеть' : 'Подключить Wi-Fi';
+    $('change-uplink').setAttribute('aria-expanded', String(!$('network-picker').hidden));
+    renderNetworkPicker();
   }
   function setBusy(value) {
+    value = value || firmwareUpdater?.isLocked() === true;
     busy = value;
-    document.querySelectorAll('button:not(#logout), input, select, textarea').forEach(control => { control.disabled = value; });
+    document.querySelectorAll('button:not(#logout), input, select, textarea').forEach(control => {
+      if (!control.closest('#update-dialog')) control.disabled = value;
+    });
     $('dashboard').setAttribute('aria-busy', String(value));
     $('login-form').setAttribute('aria-busy', String(value));
     if (!value) {
       $('toggle').disabled = !status || !(status.tunnel || {}).configured;
-      $('scan-refresh').disabled = scanning;
-      $('upstream-network').disabled = scanning || !networks.length;
-      updateNetworkFields();
+      renderNetworkPicker();
       updateDeviceControls();
     }
   }
@@ -261,11 +289,11 @@
     $('toggle').disabled = busy || !tunnel.configured;
     $('tunnel-dot').className = 'dot ' + (uplink.connected === false ? 'off' : route.known && route.mode === 'proxy' && tunnel.healthy === true ? 'on' : route.fallback ? 'off' : '');
     $('proxy-state').textContent = !tunnel.configured ? 'Профиль не добавлен' : route.fallback ? 'Резервное подключение' : !route.known ? 'Доступность не проверена' : !tunnel.enabled ? 'Выключен' : tunnel.healthy === true ? 'Подключён' : tunnel.reason === 'checking' ? 'Проверяем подключение' : 'Недоступен';
-    $('active-uplink').hidden = uplink.mode !== 'wifi';
-    $('active-uplink-name').textContent = uplink.ssid || (uplink.connected === false ? 'Wi-Fi не подключён' : 'Подключено по Wi-Fi');
+    renderInternet();
     if (!seeded) { $('downstream-ssid').value = (status.wifi || {}).ssid || ''; seeded = true; }
     renderMetrics();
     renderDevices();
+    firmwareUpdater?.consider();
   }
   function staleStatus(error) {
     if (!session) { errorAt('login-error', safeMessage(error)); return; }
@@ -274,7 +302,7 @@
     $('tunnel-description').textContent = safeMessage(error);
     $('tunnel-dot').className = 'dot';
     $('proxy-state').textContent = 'Состояние неизвестно';
-    $('active-uplink').hidden = true;
+    renderInternet();
     $('toggle').disabled = true;
     renderMetrics();
     updateDeviceControls();
@@ -324,14 +352,15 @@
     finally { setBusy(false); }
   }
   async function scanNetworks() {
-    if (!session || scanning) return;
+    if (!session || scanning || busy) return;
     const token = session, selected = selectedNetwork()?.ssid;
-    scanning = true; $('scan-refresh').disabled = true; $('upstream-network').disabled = true; errorAt('internet-error');
+    scanning = true; scanMessage = ''; renderNetworkPicker();
     try {
       const result = demo ? { networks: demoNetworks } : await rpc('wifi_proxy', 'scan_wifi', {});
       if (!session || session !== token) return;
       if (!Array.isArray(result.networks)) throw new Error('Роутер не вернул список сетей.');
       networks = result.networks.filter(network => typeof network.ssid === 'string' && network.ssid.length > 0).slice(0, 100);
+      scanLoaded = true;
       $('upstream-network').replaceChildren();
       const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = networks.length ? 'Выберите сеть' : 'Сети не найдены';
       $('upstream-network').append(placeholder);
@@ -343,8 +372,8 @@
       updateNetworkFields();
     } catch (error) {
       if (!session) errorAt('login-error', safeMessage(error));
-      else if (session === token) errorAt('internet-error', [1, 3, 4].includes(error.code) ? 'Поиск Wi-Fi сетей недоступен на этой версии роутера.' : safeMessage(error));
-    } finally { scanning = false; $('scan-refresh').disabled = busy; $('upstream-network').disabled = busy || !networks.length; }
+      else if (session === token) scanMessage = [1, 3, 4].includes(error.code) ? 'Поиск сетей недоступен на этой версии прошивки.' : 'Поиск сетей сейчас недоступен. Попробуйте ещё раз. Выбранная сеть не меняется.';
+    } finally { if (session === token) { scanning = false; renderNetworkPicker(); } }
   }
   function openPaste() {
     errorAt('paste-error'); clearSecret('profile-uri');
@@ -413,13 +442,21 @@
   $('paste-dialog').addEventListener('close', () => clearSecret('profile-uri'));
   $('paste-dialog').addEventListener('cancel', () => clearSecret('profile-uri'));
   $('scan-refresh').addEventListener('click', scanNetworks);
+  $('change-uplink').addEventListener('click', () => {
+    if (busy || !session) return;
+    $('network-picker').hidden = !$('network-picker').hidden;
+    renderInternet();
+    if (!$('network-picker').hidden && !scanLoaded) scanNetworks();
+  });
   $('upstream-network').addEventListener('change', () => { clearSecret('upstream-password'); errorAt('internet-error'); updateNetworkFields(); });
-  $('uplink-form').addEventListener('submit', event => {
-    event.preventDefault(); const network = selectedNetwork();
+  $('uplink-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (busy || scanning) return; const network = selectedNetwork();
     if (!network) { errorAt('internet-error', 'Выберите Wi-Fi сеть.'); return; }
     const password = $('upstream-password').value; clearSecret('upstream-password');
     if (secured(network) && password.length < 8) { errorAt('internet-error', 'Пароль должен содержать не менее 8 символов.'); return; }
-    action('set_uplink', { mode: 'wifi', ssid: network.ssid, security: network.security, password: secured(network) ? password : '' }, 'internet-error', [password]);
+    if (await action('set_uplink', { mode: 'wifi', ssid: network.ssid, security: network.security, password: secured(network) ? password : '' }, 'internet-error', [password])) {
+      $('network-picker').hidden = true; renderInternet();
+    }
   });
   $('uplink-disconnect').addEventListener('click', () => { clearSecret('upstream-password'); action('set_uplink', { mode: 'ethernet' }, 'internet-error'); });
   $('wifi-form').addEventListener('submit', event => {
@@ -433,6 +470,14 @@
     try { await refresh(); } catch (error) { staleStatus(error); }
   }, 5000);
   window.addEventListener('pagehide', () => { clearSecrets(); closePaste(); });
+  firmwareUpdater = window.createFirmwareUpdater({
+    call: (method, args, timeout) => rpc('wifi_proxy', method, args, session, timeout),
+    hasSession: () => !!session,
+    installedVersion: () => reportedVersion(status?.system || {}),
+    online: () => status?.uplink?.connected === true,
+    isDemo: () => demo,
+    setLocked: value => setBusy(value),
+  });
   updateNetworkFields();
   if (demo && query.get('view') !== 'login') {
     session = 'demo'; status = demoStatus; seedDemo(); render(); showDashboard();

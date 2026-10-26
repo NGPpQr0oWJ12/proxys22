@@ -15,7 +15,10 @@ case "$1" in
 			device=${path%/phy80211}
 			device=${device##*/}
 			case "$device" in *[!a-zA-Z0-9_.:-]*|'') continue ;; esac
-			exec /usr/bin/iwinfo "$device" scan 2>/dev/null
+			if output=$(/usr/bin/iwinfo "$device" scan 2>/dev/null); then
+				[ -z "$output" ] || printf '%s\n' "$output"
+				exit 0
+			fi
 		done
 		exit 1
 		;;

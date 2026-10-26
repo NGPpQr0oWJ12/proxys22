@@ -17,7 +17,7 @@ def call(method, payload):
 
 
 methods = json.loads(subprocess.check_output(command + ['list'], text=True, timeout=10))
-assert set(methods) == {'status', 'import_profile', 'import_awg', 'set_enabled', 'set_uplink', 'set_wifi', 'scan_wifi', 'set_device_blocked'}
+assert set(methods) == {'status', 'import_profile', 'import_awg', 'set_enabled', 'set_uplink', 'set_wifi', 'scan_wifi', 'set_device_blocked', 'update_check', 'update_status', 'update_prepare', 'update_backup', 'update_apply'}
 config_dir = root / 'etc/config'
 config_dir.mkdir(exist_ok=True)
 (config_dir / 'wireless').write_text("config wifi-device 'radio0'\n\toption disabled '1'\nconfig wifi-iface 'default_radio0'\n\toption device 'radio0'\n\toption network 'lan'\n\toption mode 'ap'\n")

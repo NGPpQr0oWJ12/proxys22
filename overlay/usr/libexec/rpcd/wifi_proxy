@@ -5,11 +5,14 @@ import { connect } from 'ubus';
 import { parse_profile, client_config } from '/usr/share/wifi-proxy/profile.uc';
 import { parse_awg } from '/usr/share/wifi-proxy/awg.uc';
 import { read_json, sample_metrics, list_devices, devices_ready, canonical_mac, scan_wifi as scan_networks } from '/usr/share/wifi-proxy/status.uc';
+import { update_dispatch } from '/usr/share/wifi-proxy/update.uc';
 
 const methods = {
 	status: {}, import_profile: { uri: '' }, import_awg: { config: '' }, set_enabled: { enabled: false },
 	set_uplink: { mode: '', ssid: '', password: '', security: '' }, set_wifi: { ssid: '', password: '' },
-	scan_wifi: {}, set_device_blocked: { mac: '', blocked: false }
+	scan_wifi: {}, set_device_blocked: { mac: '', blocked: false },
+	update_check: {}, update_status: {}, update_prepare: { version: '' }, update_backup: { job_id: '' },
+	update_apply: { job_id: '', confirmation: '', backup_saved: false }
 };
 const config_file = '/etc/wifi-proxy/client.json';
 
@@ -85,6 +88,10 @@ function status(uci) {
 	return result;
 }
 function dispatch(method, args) {
+	if (index(['update_check', 'update_status', 'update_prepare', 'update_backup', 'update_apply'], method) >= 0)
+		return update_dispatch(method, args);
+	if (method != 'status' && method != 'scan_wifi' && update_dispatch('update_status', {}).phase == 'upgrading')
+		fail('Обновление уже подтверждено. Дождитесь перезагрузки перед изменением настроек.');
 	let uci = cursor();
 	if (method == 'status') return status(uci);
 	if (method == 'scan_wifi') {

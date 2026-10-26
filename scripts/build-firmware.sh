@@ -101,7 +101,7 @@ for path in pathlib.Path(sys.argv[1]).rglob("*"):
 web = pathlib.Path(sys.argv[1]) / "www"
 index = web / "index.html"
 html = index.read_text(encoding="utf-8")
-for asset in ("app.js", "style.css", "logo.png"):
+for asset in ("app.js", "update.js", "style.css", "logo.png"):
     stamp = hashlib.sha256((web / "assets" / asset).read_bytes()).hexdigest()[:12]
     html = re.sub(r'/assets/' + re.escape(asset) + r'(?:\?[^"\s]*)?',
                   f'/assets/{asset}?v={sys.argv[2]}-{stamp}', html)

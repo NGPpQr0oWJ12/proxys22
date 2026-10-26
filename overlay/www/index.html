@@ -7,13 +7,14 @@
   <meta name="referrer" content="no-referrer">
   <title>proxys22</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/assets/style.css?v=0.4.1">
-  <script src="/assets/app.js?v=0.4.1" defer></script>
+  <link rel="stylesheet" href="/assets/style.css?v=0.5.0">
+  <script src="/assets/update.js?v=0.5.0" defer></script>
+  <script src="/assets/app.js?v=0.5.0" defer></script>
 </head>
 <body>
   <div class="shell">
     <header id="topbar" class="topbar" hidden>
-      <div class="header-brand"><a class="brand" href="/" aria-label="proxys22, главная"><img src="/assets/logo.png" width="76" height="76" alt="proxys22"></a><div class="system-info header-meta" aria-label="О роутере"><span id="firmware">proxys22 —</span><span>В работе <span id="uptime">—</span></span></div></div>
+      <div class="header-brand"><a class="brand" href="/" aria-label="proxys22, главная"><img src="/assets/logo.png" width="76" height="76" alt="proxys22"></a><div class="system-info header-meta" aria-label="О роутере"><div class="firmware-line"><button id="firmware" class="firmware-button" type="button" aria-haspopup="dialog" aria-controls="update-dialog" title="Проверить обновления прошивки">proxys22 —</button><button id="update-available" class="update-badge" type="button" hidden></button></div><span>В работе <span id="uptime">—</span></span></div></div>
       <div class="header-actions"><span id="demo-badge" class="small-label" hidden>Демо</span><button id="logout" class="icon-button" type="button" aria-label="Выйти из управления" title="Выйти"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 5H5v14h5m4-11 4 4-4 4m-6-4h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
     </header>
 
@@ -53,12 +54,18 @@
         </section>
 
         <section class="card internet-card" aria-labelledby="internet-heading">
-          <div class="card-heading"><h2 id="internet-heading">Интернет</h2><button id="scan-refresh" class="icon-button" type="button" aria-label="Обновить список Wi-Fi сетей" title="Обновить список Wi-Fi сетей"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M19 8a8 8 0 1 0 1 7M19 3v5h-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
-          <div id="active-uplink" class="active-uplink" hidden><p id="active-uplink-name"></p><button id="uplink-disconnect" class="button" type="button">Отключиться</button></div>
-          <form id="uplink-form" autocomplete="off">
-            <label for="upstream-network">Доступные Wi-Fi сети</label><select id="upstream-network" aria-describedby="internet-error"><option value="">Выберите сеть</option></select>
-            <div id="upstream-fields" hidden><div id="upstream-password-field"><label for="upstream-password">Пароль сети</label><input id="upstream-password" type="password" data-secret autocomplete="new-password" minlength="8" maxlength="63" placeholder="Пароль Wi-Fi"></div><button class="button" type="submit">Подключиться</button></div>
-          </form>
+          <div class="internet-heading"><h2 id="internet-heading">Интернет</h2><span id="uplink-state" class="connection-badge">Проверяем</span></div>
+          <div id="active-uplink" class="uplink-summary"><span id="uplink-type" class="small-label">Источник Интернета</span><p id="active-uplink-name" class="uplink-name">Получаем состояние…</p><p id="uplink-description" class="secondary"></p></div>
+          <div class="internet-actions"><button id="change-uplink" class="button" type="button" aria-expanded="false" aria-controls="network-picker">Подключить Wi-Fi</button><button id="uplink-disconnect" class="text-button" type="button" hidden>Отключиться</button></div>
+          <div id="network-picker" class="network-picker" role="region" aria-labelledby="network-picker-title" hidden>
+            <div class="scan-heading"><span id="network-picker-title" class="small-label">Доступные Wi-Fi сети</span><button id="scan-refresh" class="text-button" type="button">Обновить список</button></div>
+            <p id="scan-note" class="scan-note" role="status" aria-live="polite">Нажмите «Обновить список», чтобы найти сети.</p>
+            <form id="uplink-form" autocomplete="off" hidden>
+              <label for="upstream-network">Выберите сеть</label><select id="upstream-network" aria-describedby="scan-note scan-message"><option value="">Выберите сеть</option></select>
+              <div id="upstream-fields" hidden><div id="upstream-password-field"><label for="upstream-password">Пароль сети</label><input id="upstream-password" type="password" data-secret autocomplete="new-password" minlength="8" maxlength="63" placeholder="Пароль Wi-Fi"></div><button id="upstream-connect" class="button primary" type="submit">Подключиться</button></div>
+            </form>
+            <p id="scan-message" class="scan-notice" role="status" aria-live="polite" hidden></p>
+          </div>
           <p id="internet-error" class="inline-error" role="status" aria-live="polite" hidden></p>
         </section>
 
@@ -68,6 +75,26 @@
       </div>
     </main>
 
+    <dialog id="update-dialog" aria-labelledby="update-title">
+      <div class="dialog-heading"><h2 id="update-title">Обновление прошивки</h2><button id="update-close" class="icon-button" type="button" aria-label="Закрыть обновление"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></div>
+      <div class="update-versions"><div><span class="small-label">Установлена</span><strong id="update-installed">—</strong></div><div><span class="small-label">Стабильный релиз</span><strong id="update-latest">—</strong></div></div>
+      <p id="update-stage" class="secondary" role="status" aria-live="polite">Проверьте наличие новой версии.</p>
+      <div id="update-transfer" class="update-transfer" hidden><div><span>Загрузка образа</span><span id="update-percent">0%</span></div><progress id="update-progress" max="100" value="0" aria-label="Загрузка прошивки"></progress></div>
+      <p id="update-error" class="inline-error" role="status" aria-live="polite" hidden></p>
+      <div id="update-actions" class="update-actions"><button id="update-check" class="button" type="button">Проверить обновления</button><button id="update-prepare" class="button primary" type="button" hidden>Подготовить обновление</button></div>
+      <div id="update-ready" class="update-ready" hidden>
+        <p class="small-label">Образ проверен и готов к установке</p>
+        <p class="secondary">Сначала скачайте закрытую резервную копию настроек. Она содержит пароли и ключи VPN — храните её у себя.</p>
+        <button id="update-backup" class="button" type="button">Скачать резервную копию</button>
+        <form id="update-apply-form" autocomplete="off">
+          <label class="update-checkbox"><input id="update-backup-saved" type="checkbox" disabled><span>Резервная копия сохранена на моём компьютере</span></label>
+          <label for="update-confirmation">Для установки введите ОБНОВИТЬ</label><input id="update-confirmation" autocomplete="off" spellcheck="false" maxlength="16" placeholder="ОБНОВИТЬ" disabled>
+          <p class="update-warning">Во время записи и перезагрузки сохраняйте питание роутера. Настройки и профили VPN сохраняются.</p>
+          <button id="update-apply" class="button primary" type="submit" disabled>Обновить и перезагрузить</button>
+        </form>
+      </div>
+      <button id="update-reload" class="button" type="button" hidden>Открыть панель заново</button>
+    </dialog>
     <dialog id="paste-dialog" aria-labelledby="paste-title"><div class="dialog-heading"><h2 id="paste-title">Вставить config</h2><button id="paste-close" class="icon-button" type="button" aria-label="Закрыть"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></div><form id="profile-form" autocomplete="off"><label for="profile-uri">Конфиг AmneziaWG (.conf) или ссылка Hysteria 2</label><textarea id="profile-uri" data-secret autocomplete="off" spellcheck="false" autocapitalize="off" required maxlength="8192" rows="10" placeholder="[Interface]&#10;PrivateKey = …&#10;Address = …&#10;&#10;[Peer]&#10;PublicKey = …&#10;Endpoint = …" aria-describedby="paste-error"></textarea><p id="paste-error" class="inline-error" role="status" aria-live="polite" hidden></p><button class="button primary" type="submit">Импортировать</button></form></dialog>
   </div>
 </body>
