@@ -56,11 +56,11 @@ def release_fixture(version=VERSION):
 
 STUB = r'''
 import base64, hashlib, json, os, pathlib, subprocess, sys
-fixture = json.loads(pathlib.Path(os.environ['WEB_UPDATE_FIXTURE']).read_text())
+fixture = json.loads(pathlib.Path(os.environ['WEB_UPDATE_FIXTURE']).read_text(encoding='utf-8'))
 root = pathlib.Path(fixture['root'])
 kind = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
-with open(fixture['calls'], 'a') as log:
+with open(fixture['calls'], 'a', encoding='utf-8') as log:
     log.write(json.dumps([kind, *args]) + '\n')
 if kind == 'curl':
     if fixture.get('curl_failure'):
@@ -95,7 +95,7 @@ elif action == 'verify-backup':
 elif action == 'test-image':
     sys.exit(fixture.get('test_failure', 0))
 elif action == 'flash':
-    (root / 'flash-stub-called').write_text('Only an offline stub was invoked.\n')
+    (root / 'flash-stub-called').write_text('Only an offline stub was invoked.\n', encoding='utf-8')
 else:
     sys.exit(99)
 '''
@@ -103,7 +103,7 @@ else:
 
 class AuthSchemaTests(unittest.TestCase):
     def test_update_privileges_and_rpc_argument_schemas_are_explicit(self):
-        acl = json.loads((REPO / 'overlay/usr/share/rpcd/acl.d/wifi-proxy.json').read_text())['wifi-proxy']
+        acl = json.loads((REPO / 'overlay/usr/share/rpcd/acl.d/wifi-proxy.json').read_text(encoding='utf-8'))['wifi-proxy']
         read = acl['read']['ubus']['wifi_proxy']
         write = acl['write']['ubus']['wifi_proxy']
         self.assertIn('update_check', read)
@@ -111,7 +111,7 @@ class AuthSchemaTests(unittest.TestCase):
         for name in ('update_prepare', 'update_backup', 'update_apply'):
             self.assertIn(name, write)
             self.assertNotIn(name, read)
-        source = (REPO / 'overlay/usr/libexec/rpcd/wifi_proxy').read_text()
+        source = (REPO / 'overlay/usr/libexec/rpcd/wifi_proxy').read_text(encoding='utf-8')
         self.assertIn("update_prepare: { version: '' }", source)
         self.assertIn("update_backup: { job_id: '' }", source)
         self.assertIn("update_apply: { job_id: '', confirmation: '', backup_saved: false }", source)
@@ -126,22 +126,22 @@ class WebUpdateTests(unittest.TestCase):
         self.root = self.directory / 'runtime'
         self.etc = self.directory / 'filesystem'
         self.marker = self.directory / 'marker.json'
-        self.marker.write_text(json.dumps({'name': 'proxys22', 'version': '0.4.1'}))
+        self.marker.write_text(json.dumps({'name': 'proxys22', 'version': '0.4.1'}), encoding='utf-8')
         for name in REQUIRED:
             path = self.etc / name.lstrip('/')
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('fixture settings\n')
+            path.write_text('fixture settings\n', encoding='utf-8')
         self.helper = self.directory / 'helper'
         self.curl = self.directory / 'curl'
         for executable in (self.helper, self.curl):
-            executable.write_text(f'#!{sys.executable}\n' + STUB)
+            executable.write_text(f'#!{sys.executable}\n' + STUB, encoding='utf-8')
             executable.chmod(0o755)
         self.fixture_path = self.directory / 'fixture.json'
         self.metadata, self.manifest = release_fixture()
         self.fixture = {'root': str(self.root), 'etc': str(self.etc), 'calls': str(self.directory / 'calls.jsonl'),
                         'board': copy.deepcopy(BOARD), 'required': REQUIRED, 'backup': base64.b64encode(archive_bytes()).decode()}
         self.sync_fixture()
-        source = (REPO / 'overlay/usr/share/wifi-proxy/update.uc').read_text()
+        source = (REPO / 'overlay/usr/share/wifi-proxy/update.uc').read_text(encoding='utf-8')
         source = source.replace('/tmp/proxys22-update', str(self.root))
         source = source.replace('/usr/libexec/wifi-proxy/update', str(self.helper))
         source = source.replace('/usr/bin/curl', str(self.curl))
@@ -149,7 +149,7 @@ class WebUpdateTests(unittest.TestCase):
         source = source.replace('/bin/ubus -t 5 call system board', str(self.helper) + ' board')
         source = source.replace('stat(path)', "stat('" + str(self.etc) + "' + path)")
         self.module = self.directory / 'update.uc'
-        self.module.write_text(source)
+        self.module.write_text(source, encoding='utf-8')
 
     def sync_fixture(self):
         manifest_url = self.metadata['assets'][-1]['browser_download_url']
@@ -160,12 +160,12 @@ class WebUpdateTests(unittest.TestCase):
             manifest_url: json.dumps(self.manifest).encode(), image_url: PAYLOAD,
         }
         self.fixture['downloads'] = {url: base64.b64encode(body).decode() for url, body in downloads.items()}
-        self.fixture_path.write_text(json.dumps(self.fixture))
+        self.fixture_path.write_text(json.dumps(self.fixture), encoding='utf-8')
 
     def evaluate(self, expression):
         source = (f"import {{ update_dispatch, run_update, validate_release, validate_board_info, compare_versions }} from '{self.module}';\n"
                   "try { printf('%J', " + expression + "); } catch (e) { printf('%J', { ok: false, message: e.message }); }\n")
-        result = subprocess.run([str(UCODE), '-L', MODULES, '-e', source], text=True, capture_output=True,
+        result = subprocess.run([str(UCODE), '-L', MODULES, '-e', source], text=True, encoding='utf-8', capture_output=True,
                                 env={**os.environ, 'WEB_UPDATE_FIXTURE': str(self.fixture_path)}, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -181,7 +181,7 @@ class WebUpdateTests(unittest.TestCase):
 
     def calls(self):
         path = Path(self.fixture['calls'])
-        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()] if path.exists() else []
 
     def ready(self):
         check = self.call('update_check')
@@ -235,7 +235,7 @@ class WebUpdateTests(unittest.TestCase):
         self.assertEqual(sum(row == ['helper', 'start-check'] for row in self.calls()), 1)
 
     def test_same_version_is_current_and_cannot_prepare(self):
-        self.marker.write_text(json.dumps({'name': 'proxys22', 'version': VERSION}))
+        self.marker.write_text(json.dumps({'name': 'proxys22', 'version': VERSION}), encoding='utf-8')
         self.call('update_check')
         self.assertEqual(self.worker('check'), 0)
         self.assertEqual(self.status()['phase'], 'current')
@@ -303,7 +303,7 @@ class WebUpdateTests(unittest.TestCase):
                 if changed == 'image':
                     (self.root / 'image.bin').write_bytes(b'x' * len(PAYLOAD))
                 elif changed == 'profile':
-                    (self.etc / 'etc/wifi-proxy/awg.json').write_text('changed fixture profile')
+                    (self.etc / 'etc/wifi-proxy/awg.json').write_text('changed fixture profile', encoding='utf-8')
                 elif changed == 'board':
                     self.fixture['board']['board_name'] = 'other'
                     self.sync_fixture()
@@ -419,7 +419,7 @@ class WebUpdateTests(unittest.TestCase):
                     self.fixture['downloads'][url] = base64.b64encode(
                         b'x' * len(PAYLOAD) if failure == 'hash' else PAYLOAD + b'oversize',
                     ).decode()
-                    self.fixture_path.write_text(json.dumps(self.fixture))
+                    self.fixture_path.write_text(json.dumps(self.fixture), encoding='utf-8')
                 self.call('update_prepare', {'version': VERSION})
                 self.assertEqual(self.worker('prepare'), 1)
                 self.assertEqual(self.status()['phase'], 'error')
@@ -443,9 +443,9 @@ class WebUpdateTests(unittest.TestCase):
         (self.root / 'lock').rmdir()
         job = self.call('update_check')['job_id']
         path = self.root / 'state.json'
-        state = json.loads(path.read_text())
+        state = json.loads(path.read_text(encoding='utf-8'))
         state['updated_at'] = int(time.time()) - 1300
-        path.write_text(json.dumps(state))
+        path.write_text(json.dumps(state), encoding='utf-8')
         self.assertEqual(self.status()['phase'], 'error')
         self.assertFalse((self.root / 'lock').exists())
         self.assertFalse(self.call('update_apply', {'job_id': job, 'confirmation': '', 'backup_saved': False})['ok'])
@@ -471,12 +471,12 @@ class MipsContractTests(unittest.TestCase):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes((REPO / 'overlay' / name).read_bytes().replace(b'\r\n', b'\n'))
             prefix = ['chroot', str(root), '/tmp/qemu-mipsel-static', '/usr/bin/ucode']
-            result = subprocess.run(prefix + ['/usr/libexec/rpcd/wifi_proxy', 'list'], text=True,
+            result = subprocess.run(prefix + ['/usr/libexec/rpcd/wifi_proxy', 'list'], text=True, encoding='utf-8',
                                     capture_output=True, check=True, timeout=10)
             methods = json.loads(result.stdout)
             self.assertEqual(methods['update_apply'], {'job_id': '', 'confirmation': '', 'backup_saved': False})
             result = subprocess.run(prefix + ['/usr/libexec/rpcd/wifi_proxy', 'call', 'update_status'], input='{}',
-                                    text=True, capture_output=True, check=True, timeout=10)
+                                    text=True, encoding='utf-8', capture_output=True, check=True, timeout=10)
             self.assertEqual(json.loads(result.stdout)['phase'], 'idle')
             self.assertTrue((root / 'tmp/proxys22-update').is_dir())
             backup = root / 'tmp/proxys22-update/backup.tar.gz'
@@ -487,7 +487,7 @@ class MipsContractTests(unittest.TestCase):
             subprocess.run(busybox + ['gzip', '-t', '/tmp/proxys22-update/backup.tar.gz'], check=True,
                            capture_output=True, timeout=10)
             result = subprocess.run(busybox + ['tar', '-tvzf', '/tmp/proxys22-update/backup.tar.gz'], check=True,
-                                    text=True, capture_output=True, timeout=10)
+                                    text=True, encoding='utf-8', capture_output=True, timeout=10)
             self.assertTrue(all(any(line.startswith('-') and line.endswith(name.lstrip('/'))
                                     for line in result.stdout.splitlines()) for name in REQUIRED))
             backup.write_bytes(backup.read_bytes()[:-8])
@@ -502,20 +502,20 @@ class FixedHelperTests(unittest.TestCase):
             root = Path(temp)
             calls = root / 'calls.jsonl'
             stub = root / 'sysupgrade'
-            stub.write_text(f'#!{sys.executable}\nimport json,sys\nwith open({str(calls)!r}, "a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\n')
+            stub.write_text(f'#!{sys.executable}\nimport json,sys\nwith open({str(calls)!r}, "a", encoding="utf-8") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\n', encoding='utf-8')
             stub.chmod(0o755)
-            source = (REPO / 'overlay/usr/libexec/wifi-proxy/update').read_text()
+            source = (REPO / 'overlay/usr/libexec/wifi-proxy/update').read_text(encoding='utf-8')
             source = source.replace('/tmp/proxys22-update', str(root)).replace('/sbin/sysupgrade', str(stub))
             source = source.replace('/bin/sleep 2', ':')
             for mode in ('backup', 'test-image', 'flash'):
-                result = subprocess.run(['/bin/sh', '-s', '--', mode], input=source, text=True,
+                result = subprocess.run(['/bin/sh', '-s', '--', mode], input=source, text=True, encoding='utf-8',
                                         capture_output=True, timeout=5)
                 self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual([json.loads(line) for line in calls.read_text().splitlines()], [
+            self.assertEqual([json.loads(line) for line in calls.read_text(encoding='utf-8').splitlines()], [
                 ['-b', str(root / 'backup.tar.gz')], ['-T', str(root / 'image.bin')], [str(root / 'image.bin')],
             ])
             before = calls.read_bytes()
-            result = subprocess.run(['/bin/sh', '-s', '--', 'flash; reboot'], input=source, text=True,
+            result = subprocess.run(['/bin/sh', '-s', '--', 'flash; reboot'], input=source, text=True, encoding='utf-8',
                                     capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 1)
             self.assertEqual(calls.read_bytes(), before)

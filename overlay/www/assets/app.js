@@ -11,7 +11,7 @@
   let scanLoaded = false, scanMessage = '';
   let firmwareUpdater = null;
   const demoStatus = {
-    system: { model: 'KN-1112', version: '0.5.0', firmware: 'proxys22 0.5.0', uptime: 98124 },
+    system: { model: 'KN-1112', version: '0.5.1', firmware: 'proxys22 0.5.1', uptime: 98124 },
     tunnel: { protocol: 'amneziawg', configured: true, enabled: true, running: true, mode: demoFallback ? 'direct' : 'proxy', healthy: !demoFallback, reason: demoFallback ? 'unavailable' : 'healthy' },
     uplink: { mode: 'ethernet', connected: true }, wifi: { ssid: 'Home Network' },
     devices: [
