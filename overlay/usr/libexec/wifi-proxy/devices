@@ -1,0 +1,23 @@
+#!/bin/sh
+# Fixed commands only: ucode's bundled fs.popen() does not accept argv arrays.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+case "$1" in
+	apply|set)
+		exec /usr/bin/ucode -e 'import { device_command } from "/usr/share/wifi-proxy/status.uc"; exit(device_command(ARGV));' -- "$@"
+		;;
+	nft) exec /usr/sbin/nft -f - >/dev/null 2>&1 ;;
+	check) /usr/sbin/nft list chain inet proxys22_devices prerouting >/dev/null 2>&1 ;;
+	neighbors) exec /sbin/ip -j neigh show 2>/dev/null ;;
+	scan)
+		for path in /sys/class/net/*/phy80211; do
+			[ -e "$path" ] || continue
+			device=${path%/phy80211}
+			device=${device##*/}
+			case "$device" in *[!a-zA-Z0-9_.:-]*|'') continue ;; esac
+			exec /usr/bin/iwinfo "$device" scan 2>/dev/null
+		done
+		exit 1
+		;;
+	*) exit 1 ;;
+esac

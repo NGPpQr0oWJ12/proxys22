@@ -1,0 +1,106 @@
+name: Test, build and release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*.*.*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-manager.txt
+      - run: python -m unittest discover -s tests -p "test_*.py"
+      - run: node --check overlay/www/assets/app.js
+      - run: python proxys22.py doctor
+
+  manager:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-manager-build.txt
+      - run: python scripts/package-manager.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: manager-${{ matrix.os }}
+          path: dist/manager/*
+          if-no-files-found: error
+
+  firmware:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install OpenWrt build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3 python3-setuptools rsync swig unzip zlib1g-dev file wget zstd curl ca-certificates
+          sudo mkdir -p /opt/wifi-proxy
+          sudo chown "$USER:$USER" /opt/wifi-proxy
+      - name: Verify tag and build versions
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from proxys22_manager import VERSION
+          config = json.load(open('config/build.json'))
+          firmware = json.load(open('overlay/etc/proxys22-release'))
+          assert os.environ['GITHUB_REF_NAME'] == 'v' + VERSION == 'v' + config['version'] == 'v' + firmware['version']
+          PY
+      - run: bash scripts/build-firmware.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: firmware
+          path: |
+            dist/*-factory.bin
+            dist/*-sysupgrade.bin
+            dist/*.manifest
+            dist/proxys22-release.json
+            dist/build.json
+            dist/amneziawg.json
+          if-no-files-found: error
+
+  publish:
+    needs: [manager, firmware]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          sha256sum * > ../sha256sums
+          mv ../sha256sums .
+          sha256sum -c sha256sums
+          cd ..
+          gh release create "$GITHUB_REF_NAME" artifacts/* --verify-tag --title "proxys22 ${GITHUB_REF_NAME#v}" --notes-file "docs/releases/${GITHUB_REF_NAME#v}.md"

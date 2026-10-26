@@ -1,0 +1,44 @@
+#!/bin/sh /etc/rc.common
+START=95
+STOP=10
+
+start() {
+	[ "$(uci -q get wifi_proxy.main.protocol)" = amneziawg ] || return 0
+	rm -f /var/run/wifi-proxy/client.generation /var/run/wifi-proxy/health.successes
+	/usr/libexec/wifi-proxy/routes direct starting || return 1
+	[ "$(uci -q get wifi_proxy.main.enabled)" = 1 ] || return 0
+	[ -s /etc/wifi-proxy/awg.json ] || return 0
+	umask 077
+	local values address mtu
+	values="$(/usr/libexec/wifi-proxy/awg-config)" || return 1
+	address="${values% *}"; mtu="${values#* }"
+	modprobe wireguard || return 1
+	[ -d /sys/module/amneziawg ] || insmod /lib/modules/$(uname -r)/amneziawg.ko || return 1
+	ip link show awg0 >/dev/null 2>&1 || ip link add awg0 type amneziawg || return 1
+	awg setconf awg0 /var/run/wifi-proxy/awg.conf || { stop; return 1; }
+	rm -f /var/run/wifi-proxy/awg.conf
+	ip -4 addr flush dev awg0
+	ip -4 addr add "$address/32" dev awg0 || { stop; return 1; }
+	ip link set awg0 mtu "$mtu" up || { stop; return 1; }
+	# A bound probe must use the tunnel even while LAN clients use direct fallback.
+	ip -4 route replace default dev awg0 table 201 || { stop; return 1; }
+	for subnet in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
+		ip -4 route replace throw "$subnet" table 201 || { stop; return 1; }
+	done
+	# Probes target public addresses; the encrypted outer UDP socket keeps the WAN route.
+	ip -4 rule add pref 90 fwmark 0x200/0x200 lookup main || { stop; return 1; }
+	ip -4 rule add pref 110 from "$address/32" lookup 201 || { stop; return 1; }
+	ip -4 rule add pref 111 oif awg0 lookup 201 || { stop; return 1; }
+	printf '%s\n' "$$" > /var/run/wifi-proxy/client.generation
+}
+
+stop() {
+	/usr/libexec/wifi-proxy/routes direct stopped || return 1
+	rm -f /var/run/wifi-proxy/client.generation /var/run/wifi-proxy/health.successes /var/run/wifi-proxy/awg.conf
+	ip -4 rule del pref 90 fwmark 0x200/0x200 lookup main >/dev/null 2>&1 || true
+	# This priority is reserved for the single AWG client; no unrelated rules are removed.
+	while ip -4 rule del pref 110 lookup 201 >/dev/null 2>&1; do :; done
+	ip -4 rule del pref 111 oif awg0 lookup 201 >/dev/null 2>&1 || true
+	ip link del awg0 >/dev/null 2>&1 || true
+	ip -4 route flush table 201 >/dev/null 2>&1 || true
+}

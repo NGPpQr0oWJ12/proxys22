@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <title>proxys22</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/style.css?v=0.4.0">
+  <script src="/assets/app.js?v=0.4.0" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header id="topbar" class="topbar" hidden>
+      <div class="header-brand"><a class="brand" href="/" aria-label="proxys22, главная"><img src="/assets/logo.png" width="76" height="76" alt="proxys22"></a><div class="system-info header-meta" aria-label="О роутере"><span id="firmware">proxys22 —</span><span>В работе <span id="uptime">—</span></span></div></div>
+      <div class="header-actions"><span id="demo-badge" class="small-label" hidden>Демо</span><button id="logout" class="icon-button" type="button" aria-label="Выйти из управления" title="Выйти"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 5H5v14h5m4-11 4 4-4 4m-6-4h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
+    </header>
+
+    <main id="login-view" class="login-view">
+      <section class="login-card" aria-labelledby="login-title">
+        <img class="login-logo" src="/assets/logo.png" width="130" height="130" alt="proxys22">
+        <h1 id="login-title">Управление роутером</h1>
+        <form id="login-form">
+          <label for="admin-password">Пароль администратора</label>
+          <div class="password-field"><input id="admin-password" type="password" data-secret autocomplete="current-password" required autofocus placeholder="Пароль root" maxlength="256" aria-describedby="login-error"><button id="password-eye" class="icon-button eye-button" type="button" aria-label="Показать пароль" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="2.5" stroke="currentColor" stroke-width="1.6"/><path id="eye-slash" d="m4 4 16 16" stroke="currentColor" stroke-width="1.6" hidden/></svg></button></div>
+          <p id="login-error" class="inline-error" role="status" aria-live="polite" hidden></p>
+          <button class="button primary login-submit" type="submit">Войти</button>
+        </form>
+      </section>
+    </main>
+
+    <main id="dashboard" hidden>
+      <div class="dashboard-grid">
+        <section class="card status-card" aria-labelledby="tunnel-title">
+          <p class="card-label"><span id="tunnel-dot" class="dot"></span>Подключение</p>
+          <h1 id="tunnel-title">Проверяем состояние</h1>
+          <p id="tunnel-description" class="secondary" aria-live="polite">Получаем состояние маршрута.</p>
+          <div class="switch-row"><span id="switch-label" class="small-label">Прокси</span><button id="toggle" class="toggle" type="button" role="switch" aria-checked="false" aria-labelledby="switch-label" aria-describedby="tunnel-description status-error" disabled><span></span></button></div>
+          <p id="status-error" class="inline-error" role="status" aria-live="polite" hidden></p>
+        </section>
+
+        <section class="card cpu-card" aria-labelledby="cpu-heading"><h2 id="cpu-heading">CPU</h2><p id="cpu-value" class="cpu-value">—</p><progress id="cpu-meter" max="100" value="0" aria-label="Загрузка процессора" hidden></progress></section>
+
+        <section class="card traffic-card" aria-labelledby="traffic-heading">
+          <h2 id="traffic-heading">Трафик</h2>
+          <div class="traffic-legend"><div><span class="small-label"><span class="line-key"></span>↓ Загрузка</span><span id="download-rate" class="rate">—</span></div><div><span class="small-label"><span class="line-key dashed"></span>↑ Отдача</span><span id="upload-rate" class="rate">—</span></div></div>
+          <div class="traffic-plot"><p id="traffic-empty" class="secondary">Нет данных</p><svg id="traffic-chart" viewBox="0 0 600 140" preserveAspectRatio="none" role="img" aria-label="История скорости загрузки и отдачи"><path class="chart-grid" d="M0 20H600M0 80H600M0 139H600"/><path id="download-path" class="chart-line" d=""/><path id="upload-path" class="chart-line upload-line" d=""/></svg></div>
+        </section>
+
+        <section class="card proxy-card" aria-labelledby="proxy-heading">
+          <h2 id="proxy-heading">Прокси</h2><p id="proxy-state" class="secondary">Состояние неизвестно</p><div class="proxy-actions"><button id="config-import" class="button primary" type="button">Вставить config</button><button id="clipboard-import" class="button" type="button">Импортировать из буфера</button></div><p id="proxy-error" class="inline-error" role="status" aria-live="polite" hidden></p>
+        </section>
+
+        <section class="card internet-card" aria-labelledby="internet-heading">
+          <div class="card-heading"><h2 id="internet-heading">Интернет</h2><button id="scan-refresh" class="icon-button" type="button" aria-label="Обновить список Wi-Fi сетей" title="Обновить список Wi-Fi сетей"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M19 8a8 8 0 1 0 1 7M19 3v5h-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
+          <div id="active-uplink" class="active-uplink" hidden><p id="active-uplink-name"></p><button id="uplink-disconnect" class="button" type="button">Отключиться</button></div>
+          <form id="uplink-form" autocomplete="off">
+            <label for="upstream-network">Доступные Wi-Fi сети</label><select id="upstream-network" aria-describedby="internet-error"><option value="">Выберите сеть</option></select>
+            <div id="upstream-fields" hidden><div id="upstream-password-field"><label for="upstream-password">Пароль сети</label><input id="upstream-password" type="password" data-secret autocomplete="new-password" minlength="8" maxlength="63" placeholder="Пароль Wi-Fi"></div><button class="button" type="submit">Подключиться</button></div>
+          </form>
+          <p id="internet-error" class="inline-error" role="status" aria-live="polite" hidden></p>
+        </section>
+
+        <section class="card wifi-card" aria-labelledby="wifi-heading"><h2 id="wifi-heading">Ваша Wi-Fi сеть</h2><form id="wifi-form" autocomplete="off"><label for="downstream-ssid">Название сети</label><input id="downstream-ssid" autocomplete="off" required maxlength="32" placeholder="Название сети"><label for="downstream-password">Новый пароль</label><input id="downstream-password" type="password" data-secret autocomplete="new-password" required minlength="8" maxlength="63" placeholder="Минимум 8 символов"><button class="button" type="submit">Сохранить</button></form><p id="wifi-error" class="inline-error" role="status" aria-live="polite" hidden></p></section>
+
+        <section class="card devices-card" aria-labelledby="devices-heading"><div class="devices-heading"><h2 id="devices-heading">Устройства</h2><span id="device-count" class="small-label"></span></div><p id="devices-note" class="secondary"></p><div class="device-table" role="table" aria-label="Устройства сети"><div id="device-table-head" class="device-table-head" role="row"><span role="columnheader">Устройство</span><span role="columnheader">Адрес</span><span role="columnheader">Подключение</span><span role="columnheader">Статус</span><span role="columnheader">Действие</span></div><div id="device-list" role="rowgroup"></div></div><p id="devices-empty" class="secondary">Нет данных об устройствах.</p><p id="devices-error" class="inline-error" role="status" aria-live="polite" hidden></p></section>
+      </div>
+    </main>
+
+    <dialog id="paste-dialog" aria-labelledby="paste-title"><div class="dialog-heading"><h2 id="paste-title">Вставить config</h2><button id="paste-close" class="icon-button" type="button" aria-label="Закрыть"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></div><form id="profile-form" autocomplete="off"><label for="profile-uri">Конфиг AmneziaWG (.conf) или ссылка Hysteria 2</label><textarea id="profile-uri" data-secret autocomplete="off" spellcheck="false" autocapitalize="off" required maxlength="8192" rows="10" placeholder="[Interface]&#10;PrivateKey = …&#10;Address = …&#10;&#10;[Peer]&#10;PublicKey = …&#10;Endpoint = …" aria-describedby="paste-error"></textarea><p id="paste-error" class="inline-error" role="status" aria-live="polite" hidden></p><button class="button primary" type="submit">Импортировать</button></form></dialog>
+  </div>
+</body>
+</html>

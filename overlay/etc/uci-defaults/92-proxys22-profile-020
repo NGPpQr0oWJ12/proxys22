@@ -1,0 +1,20 @@
+#!/bin/sh
+/usr/bin/ucode - <<'UCODE'
+// Preserve the existing server, authentication and TLS settings during upgrade.
+import { readfile, open, rename, unlink } from 'fs';
+const path = '/etc/wifi-proxy/client.json';
+let raw = readfile(path);
+if (!raw) exit(0);
+let profile = json(raw);
+profile.socks5 = { listen: '127.0.0.1:1080' };
+profile.lazy = true;
+let temporary = path + '.upgrade';
+unlink(temporary);
+let file = open(temporary, 'wx', 0o600);
+if (!file) exit(1);
+let data = sprintf('%J\n', profile);
+if (file.write(data) != length(data) || !file.close() || !rename(temporary, path)) {
+	unlink(temporary);
+	exit(1);
+}
+UCODE

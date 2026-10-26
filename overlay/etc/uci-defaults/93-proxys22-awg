@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+# sysupgrade.conf itself can be restored from an older image, hiding our new list.
+# Merge the private profile path without replacing user-defined preservation rules.
+grep -Fxq '/etc/wifi-proxy/awg.json' /etc/sysupgrade.conf ||
+	printf '\n/etc/wifi-proxy/awg.json\n' >> /etc/sysupgrade.conf
+# A device zone follows the kernel interface across stop/start. IPv6 remains disabled.
+uci -q batch <<'UCI'
+set firewall.proxys22_awg=zone
+set firewall.proxys22_awg.name='proxy'
+set firewall.proxys22_awg.family='ipv4'
+set firewall.proxys22_awg.device='awg0'
+set firewall.proxys22_awg.input='REJECT'
+set firewall.proxys22_awg.output='ACCEPT'
+set firewall.proxys22_awg.forward='REJECT'
+set firewall.proxys22_awg.masq='1'
+set firewall.proxys22_awg.mtu_fix='1'
+set firewall.proxys22_awg_lan=forwarding
+set firewall.proxys22_awg_lan.src='lan'
+set firewall.proxys22_awg_lan.dest='proxy'
+UCI
+uci commit firewall
+/etc/init.d/amneziawg enable
+exit 0

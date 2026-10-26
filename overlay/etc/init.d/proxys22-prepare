@@ -1,0 +1,12 @@
+#!/bin/sh /etc/rc.common
+START=18
+STOP=89
+
+start() {
+	mkdir -p /var/run/wifi-proxy
+	chmod 755 /var/run/wifi-proxy
+	if [ ! -e /var/run/wifi-proxy/dns.servers ]; then
+		printf 'server=9.9.9.9\nserver=1.1.1.1\n' > /var/run/wifi-proxy/dns.servers
+	fi
+	chmod 644 /var/run/wifi-proxy/dns.servers
+}

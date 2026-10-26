@@ -1,0 +1,18 @@
+{
+  "kernel": "6.12.74",
+  "sdk": {
+    "name": "openwrt-sdk-25.12.2-ramips-mt76x8_gcc-14.3.0_musl.Linux-x86_64",
+    "url": "https://downloads.openwrt.org/releases/25.12.2/targets/ramips/mt76x8/openwrt-sdk-25.12.2-ramips-mt76x8_gcc-14.3.0_musl.Linux-x86_64.tar.zst",
+    "sha256": "53165099800a06ce3c8062421c0436ad2ab1a0636f76d10fddd741a0271b56f2"
+  },
+  "module": {
+    "repository": "amneziawg-linux-kernel-module",
+    "commit": "4569c4c67f3a57414969260cafbbd04694fbaae0",
+    "sha256": "6d7608935adbcdd4c6e9fed705951e2ee85311ac212a8e8f1274abcf9b06f83e"
+  },
+  "tools": {
+    "repository": "amneziawg-tools",
+    "commit": "ee0f0a9aa34ff0a0da4b3433b9512781cfe02843",
+    "sha256": "22438f231d39ea27e4bdc69707ec3103357f3cecc9ad3eecba18a61e5b39c9b9"
+  }
+}

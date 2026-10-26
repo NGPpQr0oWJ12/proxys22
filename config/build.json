@@ -1,0 +1,27 @@
+{
+  "brand": "proxys22",
+  "version": "0.4.0",
+  "source_date_epoch": 1792972800,
+  "openwrt": {
+    "version": "25.12.2",
+    "target": "ramips/mt76x8",
+    "profile": "keenetic_kn-1112",
+    "factory_max_bytes": 16121856,
+    "imagebuilder": {
+      "url": "https://downloads.openwrt.org/releases/25.12.2/targets/ramips/mt76x8/openwrt-imagebuilder-25.12.2-ramips-mt76x8.Linux-x86_64.tar.zst",
+      "sha256": "494842938a806c5d7a0a35856d34da7cb1ec2357dc1bd0a0adac5a3361e78c40"
+    },
+    "packages": [
+      "uhttpd", "uhttpd-mod-ubus", "rpcd", "ucode", "ucode-mod-fs", "curl", "iwinfo",
+      "ucode-mod-uci", "ucode-mod-ubus", "ca-bundle", "ip-tiny",
+      "kmod-nft-tproxy", "kmod-nft-socket", "kmod-wireguard", "wpad-basic-mbedtls",
+      "-ppp", "-ppp-mod-pppoe"
+    ]
+  },
+  "hysteria": {
+    "version": "app/v2.13.0",
+    "asset": "hysteria-linux-mipsle-sf",
+    "url": "https://github.com/apernet/hysteria/releases/download/app%2Fv2.13.0/hysteria-linux-mipsle-sf",
+    "sha256": "f2f73db1a02dc0f937db9d497a3127006edcd6585ae224c15ca7a78069092d8e"
+  }
+}

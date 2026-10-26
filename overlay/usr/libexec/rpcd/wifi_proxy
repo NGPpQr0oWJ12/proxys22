@@ -1,0 +1,182 @@
+#!/usr/bin/ucode
+import { stdin, readfile, open, rename, unlink } from 'fs';
+import { cursor } from 'uci';
+import { connect } from 'ubus';
+import { parse_profile, client_config } from '/usr/share/wifi-proxy/profile.uc';
+import { parse_awg } from '/usr/share/wifi-proxy/awg.uc';
+import { read_json, sample_metrics, list_devices, devices_ready, canonical_mac, scan_wifi as scan_networks } from '/usr/share/wifi-proxy/status.uc';
+
+const methods = {
+	status: {}, import_profile: { uri: '' }, import_awg: { config: '' }, set_enabled: { enabled: false },
+	set_uplink: { mode: '', ssid: '', password: '', security: '' }, set_wifi: { ssid: '', password: '' },
+	scan_wifi: {}, set_device_blocked: { mac: '', blocked: false }
+};
+const config_file = '/etc/wifi-proxy/client.json';
+
+function fail(message) { die('WIFI_PROXY_SAFE:' + message); }
+function valid_text(value, minimum, maximum) {
+	return type(value) == 'string' && length(value) >= minimum && length(value) <= maximum &&
+		index(value, chr(0)) < 0 && index(value, '\n') < 0 && index(value, '\r') < 0;
+}
+function commit(uci, name) {
+	if (!uci.commit(name)) fail('Не удалось сохранить настройки.');
+}
+function apply(mode) {
+	// The fixed helper suppresses service output; no user data enters a shell command.
+	if (system(['/usr/libexec/wifi-proxy/apply', mode], 3000) != 0)
+		fail('Настройки сохранены, но службу не удалось перезапустить.');
+}
+function atomic_config(config, destination) {
+	let target = destination || config_file;
+	let path, file;
+	for (let n = 0; n < 16 && !file; n++) {
+		path = target + '.new.' + n;
+		file = open(path, 'wx', 0o600);
+	}
+	if (!file) fail('Не удалось создать закрытый файл профиля.');
+	let body = sprintf('%J\n', config);
+	let written = file.write(body);
+	let closed = file.close();
+	if (written != length(body) || !closed || !rename(path, target)) {
+		unlink(path);
+		fail('Не удалось сохранить профиль.');
+	}
+}
+function profile_read(protocol) {
+	try { return json(readfile(protocol == 'amneziawg' ? '/etc/wifi-proxy/awg.json' : config_file) || '{}'); } catch (e) { return {}; }
+}
+function status(uci) {
+	let protocol = uci.get('wifi_proxy', 'main', 'protocol') == 'amneziawg' ? 'amneziawg' : 'hysteria';
+	let profile = profile_read(protocol), running = false, connected = false, uptime = 0, devices;
+	if (protocol == 'amneziawg') running = !!readfile('/sys/class/net/awg0/ifindex');
+	let mode = uci.get('wifi_proxy', 'main', 'uplink') || 'ethernet';
+	let bus = connect(null, 2);
+	if (bus) {
+		if (protocol == 'hysteria') {
+			let services = bus.call('service', 'list', { name: 'hysteria' });
+			let instance = services?.hysteria?.instances?.client;
+			running = !!instance?.running;
+		}
+		let external = bus.call('network.interface.' + (mode == 'wifi' ? 'wwan' : 'wan'), 'status', {});
+		connected = !!external?.up;
+		devices = list_devices(bus, uci);
+		bus.disconnect();
+	}
+	let up = split(readfile('/proc/uptime') || '0', ' ');
+	uptime = int(up[0]);
+	let release = read_json('/etc/proxys22-release'), version;
+	if (release.name == 'proxys22' && type(release.version) == 'string' && match(release.version, /^\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$/)) version = release.version;
+	let result = {
+		system: { model: trim(readfile('/tmp/sysinfo/model') || 'Keenetic KN-1112'), firmware: version ? 'proxys22 ' + version : 'proxys22', uptime },
+		tunnel: { protocol, configured: !!profile.server, enabled: uci.get('wifi_proxy', 'main', 'enabled') == '1', running },
+		uplink: { mode, connected, ssid: mode == 'wifi' ? uci.get('wireless', 'uplink', 'ssid') || '' : '' },
+		wifi: { ssid: uci.get('wireless', 'default_radio0', 'ssid') || '' },
+		profile: { server: profile.server || '', sni: profile.tls?.sni || '' },
+		metrics: sample_metrics(), devices: devices || list_devices(null, uci),
+		capabilities: { set_device_blocked: devices_ready(uci) }
+	};
+	if (version) result.system.version = version;
+	let route = read_json('/var/run/wifi-proxy/route.json');
+	if ((route.mode == 'proxy' || route.mode == 'direct') && type(route.healthy) == 'bool') {
+		result.tunnel.mode = route.mode; result.tunnel.healthy = route.healthy;
+		if (index(['healthy', 'checking', 'unavailable', 'disabled', 'no_profile', 'stopped'], route.reason) >= 0) result.tunnel.reason = route.reason;
+		if (type(route.checked_at) == 'int' && route.checked_at > 0) result.tunnel.checked_at = route.checked_at;
+	}
+	return result;
+}
+function dispatch(method, args) {
+	let uci = cursor();
+	if (method == 'status') return status(uci);
+	if (method == 'scan_wifi') {
+		let bus = connect(null, 10), networks = scan_networks(bus);
+		bus?.disconnect();
+		if (networks == null) fail('Не удалось получить список Wi-Fi сетей.');
+		return { networks };
+	}
+	if (method == 'set_device_blocked') {
+		let mac = canonical_mac(args.mac);
+		if (!mac || type(args.blocked) != 'bool') fail('Некорректный MAC-адрес или состояние блокировки.');
+		if (system(['/usr/libexec/wifi-proxy/devices', 'set', mac, args.blocked ? '1' : '0'], 3000) != 0)
+			fail('Не удалось применить блокировку устройства.');
+		return { ok: true };
+	}
+	if (method == 'import_profile') {
+		let profile = parse_profile(args.uri);
+		atomic_config(client_config(profile));
+		uci.set('wifi_proxy', 'main', 'protocol', 'hysteria'); commit(uci, 'wifi_proxy');
+		apply('proxy');
+	}
+	else if (method == 'import_awg') {
+		let profile = parse_awg(args.config);
+		// Persist only data; native configuration is regenerated and validated at start.
+		atomic_config({ raw: profile.raw, server: profile.server }, '/etc/wifi-proxy/awg.json');
+		uci.set('wifi_proxy', 'main', 'protocol', 'amneziawg'); commit(uci, 'wifi_proxy');
+		apply('proxy');
+	}
+	else if (method == 'set_enabled') {
+		if (type(args.enabled) != 'bool') fail('Некорректное состояние туннеля.');
+		if (args.enabled && !profile_read(uci.get('wifi_proxy', 'main', 'protocol')).server) fail('Сначала импортируйте профиль подключения.');
+		uci.set('wifi_proxy', 'main', 'enabled', args.enabled ? '1' : '0');
+		commit(uci, 'wifi_proxy');
+		apply('proxy');
+	}
+	else if (method == 'set_uplink') {
+		if (args.mode != 'ethernet' && args.mode != 'wifi') fail('Неизвестный источник интернета.');
+		let security = args.security || (args.password == '' ? 'open' : 'psk2');
+		if (args.mode == 'wifi' && security != 'open' && security != 'psk2' && security != 'psk-mixed') fail('Поддерживаются открытые сети и WPA/WPA2-PSK.');
+		if (args.mode == 'wifi' && (!valid_text(args.ssid, 1, 32) ||
+			(security == 'open' ? args.password != '' : !valid_text(args.password, 8, 63))))
+			fail('Укажите имя Wi-Fi и корректный пароль сети.');
+		uci.set('network', 'wwan', 'interface');
+		uci.set('network', 'wwan', 'proto', 'dhcp');
+		uci.set('network', 'wwan', 'auto', args.mode == 'wifi' ? '1' : '0');
+		uci.set('network', 'wan', 'auto', args.mode == 'ethernet' ? '1' : '0');
+		uci.set('wireless', 'uplink', 'wifi-iface');
+		uci.set('wireless', 'uplink', 'device', 'radio0');
+		uci.set('wireless', 'uplink', 'network', 'wwan');
+		uci.set('wireless', 'uplink', 'mode', 'sta');
+		uci.set('wireless', 'uplink', 'disabled', args.mode == 'wifi' ? '0' : '1');
+		if (args.mode == 'wifi') {
+			uci.set('wireless', 'uplink', 'ssid', args.ssid);
+			uci.set('wireless', 'uplink', 'encryption', security == 'open' ? 'none' : security);
+			if (security == 'open') uci.delete('wireless', 'uplink', 'key');
+			else uci.set('wireless', 'uplink', 'key', args.password);
+			uci.set('wireless', 'radio0', 'disabled', '0');
+			uci.set('wireless', 'radio0', 'channel', 'auto');
+		}
+		uci.set('wifi_proxy', 'main', 'uplink', args.mode);
+		commit(uci, 'wireless'); commit(uci, 'network'); commit(uci, 'wifi_proxy');
+		apply('network');
+	}
+	else if (method == 'set_wifi') {
+		if (!valid_text(args.ssid, 1, 32) || !valid_text(args.password, 8, 63))
+			fail('Укажите имя Wi-Fi и пароль длиной 8–63 байта.');
+		uci.set('wireless', 'default_radio0', 'ssid', args.ssid);
+		uci.set('wireless', 'default_radio0', 'encryption', 'psk2');
+		uci.set('wireless', 'default_radio0', 'key', args.password);
+		uci.set('wireless', 'default_radio0', 'disabled', '0');
+		uci.set('wireless', 'radio0', 'disabled', '0');
+		commit(uci, 'wireless');
+		apply('wireless');
+	}
+	else fail('Команда не поддерживается.');
+	return { ok: true };
+}
+
+if (ARGV[0] == 'list') {
+	printf('%J\n', methods);
+	exit(0);
+}
+if (ARGV[0] != 'call' || !(ARGV[1] in methods)) exit(1);
+try {
+	let args = json(stdin.read(16385));
+	if (type(args) != 'object') fail('Некорректный запрос.');
+	printf('%J\n', dispatch(ARGV[1], args));
+}
+catch (e) {
+	// Only our validation errors are returned. Never serialize request or configuration.
+	let raw = e.message || '';
+	let prefix = 'WIFI_PROXY_SAFE:';
+	let message = index(raw, prefix) == 0 ? substr(raw, length(prefix)) : 'Настройки не применены.';
+	printf('%J\n', { ok: false, error: true, message });
+}

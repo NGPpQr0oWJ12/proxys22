@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+mkdir -p /etc/wifi-proxy /var/run/wifi-proxy
+chmod 700 /etc/wifi-proxy
+chmod 755 /var/run/wifi-proxy
+# Stable inode: dnsmasq may bind-mount this file into its jail.
+printf 'server=9.9.9.9\nserver=1.1.1.1\n' > /var/run/wifi-proxy/dns.servers
+chmod 644 /var/run/wifi-proxy/dns.servers
+uci -q delete 'dhcp.@dnsmasq[0].server' || true
+uci -q batch <<'UCI'
+set system.@system[0].hostname='proxys22'
+set dhcp.@dnsmasq[0].noresolv='1'
+set dhcp.@dnsmasq[0].serversfile='/var/run/wifi-proxy/dns.servers'
+set firewall.proxys22_direct=rule
+set firewall.proxys22_direct.name='proxys22 IPv4 internet'
+set firewall.proxys22_direct.src='lan'
+set firewall.proxys22_direct.dest='wan'
+set firewall.proxys22_direct.family='ipv4'
+set firewall.proxys22_direct.proto='all'
+set firewall.proxys22_direct.target='ACCEPT'
+set firewall.@defaults[0].flow_offloading='0'
+set firewall.@defaults[0].flow_offloading_hw='0'
+UCI
+uci commit system
+uci commit dhcp
+uci commit firewall
+/etc/init.d/hysteria enable
+/etc/init.d/proxys22-prepare enable
+/etc/init.d/wifi-proxy-health enable
+/etc/init.d/proxys22-devices enable
+touch /etc/wifi-proxy/initialized
+exit 0

@@ -1,0 +1,24 @@
+import { canonical_mac, metrics_delta, parse_iwinfo_scan, normalize_scan, merge_devices, lan_cidr, device_rules } from '../overlay/usr/share/wifi-proxy/status.uc';
+function check(value, message) { if (!value) die(message); }
+check(canonical_mac('02:AA:BB:00:00:01') == '02:aa:bb:00:00:01', 'canonical MAC');
+for (let value in ['', '00:00:00:00:00:00', 'ff:ff:ff:ff:ff:ff', '01:00:00:00:00:01', '02:00:00:00:00:01;reboot', null]) check(!canonical_mac(value), 'reject invalid MAC');
+let metrics = metrics_delta({ monotonic: 10.0, total: 1000, idle: 800, rx: 1000, tx: 2000 }, { monotonic: 15.0, sampled_at: 100, total: 1500, idle: 1000, rx: 1500, tx: 4500 });
+check(metrics.cpu_percent == 60 && metrics.tx_bps == 800 && metrics.rx_bps == 4000, 'CPU and client traffic directions');
+check(metrics_delta({}, { monotonic: 1.0, sampled_at: 1 }).rx_bps == null, 'no invented first sample');
+check(metrics_delta({ monotonic: 2.0, rx: 100 }, { monotonic: 3.0, rx: 0 }).tx_bps == null, 'counter reset');
+let scan = parse_iwinfo_scan('Cell 01 - Address: 02:00:00:00:00:01\n ESSID: "Example Wi-Fi"\n Signal: -55 dBm\n Encryption: WPA2 PSK (CCMP)\nCell 02 - Address: 02:00:00:00:00:02\n ESSID: "Guest"\n Signal: -70 dBm\n Encryption: none\nCell 03 - Address: 02:00:00:00:00:03\n ESSID: "Unsupported"\n Encryption: WPA3 SAE\n');
+check(length(scan) == 2 && scan[0].security == 'psk2' && scan[1].security == 'open', 'CLI Wi-Fi scan parsing');
+let legacy_scan = parse_iwinfo_scan('Cell 01 - Address: 02:00:00:00:00:01\n ESSID: "Legacy CCMP"\n Signal: -55 dBm\n Encryption: WPA PSK (CCMP)\nCell 02 - Address: 02:00:00:00:00:02\n ESSID: "Legacy mixed cipher"\n Signal: -60 dBm\n Encryption: WPA PSK (TKIP/CCMP)\nCell 03 - Address: 02:00:00:00:00:03\n ESSID: "Dual version"\n Encryption: mixed WPA/WPA2 PSK (TKIP, CCMP)\nCell 04 - Address: 02:00:00:00:00:04\n ESSID: "Enterprise"\n Encryption: WPA2 802.1X (CCMP)\n');
+check(length(legacy_scan) == 3 && legacy_scan[0].security == 'psk-mixed' && legacy_scan[1].security == 'psk-mixed' && legacy_scan[2].security == 'psk-mixed', 'actual WPA PSK and mixed-version CLI strings');
+check(normalize_scan([{ ssid: 'Legacy ubus', encryption: { enabled: true, wpa: [1], authentication: ['psk'] } }])[0].security == 'psk-mixed', 'structured legacy WPA scan');
+check(length(normalize_scan([{ ssid: 'WPA3', encryption: { enabled: true, wpa: [3], authentication: ['sae'] } }])) == 0, 'unsupported WPA3 excluded');
+let rows = merge_devices('9999 02:00:00:00:00:01 192.0.2.11 test-name *\n', [{ dev: 'br-lan', lladdr: '02:00:00:00:00:01', dst: '192.0.2.11', state: ['REACHABLE'] }], { '02:00:00:00:00:01': { assoc: true } }, ['02:00:00:00:00:02'], 100);
+check(length(rows) == 2 && rows[0].connected && rows[0].connection == 'wifi' && rows[1].blocked, 'merge leases, neighbors, Wi-Fi and retained blocked rows');
+let static_rows = merge_devices('', [{ dev: 'br-lan', lladdr: '02:00:00:00:00:01', dst: '192.0.2.11', state: ['REACHABLE'] }, { dev: 'eth0.2', lladdr: '02:00:00:00:00:02', dst: '192.0.2.1', state: ['REACHABLE'] }], {}, [], 100);
+check(length(static_rows) == 1 && static_rows[0].ip == '192.0.2.11' && static_rows[0].connected, 'static LAN address retained and WAN neighbors excluded');
+check(lan_cidr('192.168.2.1', '255.255.255.0') == '192.168.2.0/24', 'LAN prefix');
+check(!lan_cidr('192.168.2.1', '255.0.255.0'), 'reject noncontiguous mask');
+let rules = device_rules(['02:00:00:00:00:01'], '192.168.2.0/24', ['fd12:3456::/64']);
+check(index(rules, 'priority -151') >= 0 && index(rules, 'ip6 daddr') >= 0 && index(rules, 'counter drop') >= 0, 'block before TPROXY including IPv6');
+check(index(rules, '10.0.0.0/8') < 0 && index(rules, 'flush ruleset') < 0 && index(rules, 'wifi_proxy prerouting') < 0, 'do not exempt private upstream or erase other tables');
+print('PASS: MAC validation, metrics directions, Wi-Fi scan, device merge and isolated blocking rules\n');

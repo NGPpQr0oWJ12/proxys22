@@ -1,0 +1,10 @@
+#!/usr/bin/ucode
+import { readfile, open } from 'fs';
+import { parse_awg } from '/usr/share/wifi-proxy/awg.uc';
+try {
+	let stored = json(readfile('/etc/wifi-proxy/awg.json') || '{}');
+	let profile = parse_awg(stored.raw);
+	let file = open('/var/run/wifi-proxy/awg.conf', 'w', 0o600);
+	if (!file || file.write(profile.config) != length(profile.config) || !file.close()) exit(1);
+	printf('%s %d\n', profile.address, profile.mtu);
+} catch (e) { exit(1); }

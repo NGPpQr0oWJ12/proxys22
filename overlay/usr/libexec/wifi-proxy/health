@@ -1,0 +1,108 @@
+#!/bin/sh
+# One small procd worker, one bounded curl at a time; never restart fw4 or networking.
+set -eu
+
+RUNTIME=/var/run/wifi-proxy
+ROUTES=/usr/libexec/wifi-proxy/routes
+PROFILE=/etc/wifi-proxy/client.json
+mkdir -p "$RUNTIME"
+
+direct() {
+	printf '0\n' > "$RUNTIME/health.successes"
+	"$ROUTES" direct "$1"
+}
+
+prerequisite() {
+	PROTOCOL="$(uci -q get wifi_proxy.main.protocol 2>/dev/null || true)"
+	PROFILE=/etc/wifi-proxy/client.json
+	[ "$PROTOCOL" != amneziawg ] || PROFILE=/etc/wifi-proxy/awg.json
+	if [ "$(uci -q get wifi_proxy.main.enabled 2>/dev/null || true)" != 1 ]; then
+		REASON=disabled
+	elif [ ! -s "$PROFILE" ]; then
+		REASON=unconfigured
+	elif [ ! -s "$RUNTIME/client.generation" ]; then
+		REASON=client_stopped
+	elif ! command -v curl >/dev/null 2>&1; then
+		REASON=dependency_missing
+	else
+		return 0
+	fi
+	return 1
+}
+
+probe() {
+	local body code
+	if [ "$PROTOCOL" = amneziawg ]; then
+		set -- --noproxy '*' --interface awg0
+	else
+		set -- --noproxy '' --socks5-hostname 127.0.0.1:1080
+	fi
+	# SOCKS hostname mode makes both the DNS lookup and HTTP request use Hysteria.
+	# Ignore proxy environment variables, redirects and unexpected response content.
+	body="$(curl --silent --fail "$@" \
+		--connect-timeout 2 --max-time 4 --max-filesize 64 --proto '=http' \
+		http://www.msftconnecttest.com/connecttest.txt 2>/dev/null)" && \
+		[ "$body" = 'Microsoft Connect Test' ] && return 0
+	# A second independent endpoint avoids treating one connectivity site's outage as
+	# a tunnel failure. Total probe runtime is bounded to eight seconds.
+	code="$(curl --silent --fail "$@" \
+		--connect-timeout 2 --max-time 4 --max-filesize 64 --proto '=http' \
+		--output /dev/null --write-out '%{http_code}' \
+		http://connectivitycheck.gstatic.com/generate_204 2>/dev/null)" && \
+		[ "$code" = 204 ]
+}
+
+check_once() {
+	local generation successes state protocol
+	if ! prerequisite; then
+		direct "$REASON"
+		return
+	fi
+	generation="$(cat "$RUNTIME/client.generation")"
+	protocol="$PROTOCOL"
+	if ! probe; then
+		direct probe_failed
+		return
+	fi
+	# A disable/restart during the request must not reactivate stale capture rules.
+	if ! prerequisite; then
+		direct "$REASON"
+		return
+	fi
+	if [ "$(cat "$RUNTIME/client.generation")" != "$generation" ] || [ "$protocol" != "$PROTOCOL" ]; then
+		direct client_restarting
+		return
+	fi
+	successes="$(cat "$RUNTIME/health.successes" 2>/dev/null || true)"
+	case "$successes" in 1|2) ;; *) successes=0 ;; esac
+	[ "$successes" -ge 2 ] || successes=$((successes + 1))
+	printf '%s\n' "$successes" > "$RUNTIME/health.successes"
+	if [ "$successes" -lt 2 ]; then
+		"$ROUTES" direct recovering
+		return
+	fi
+	state="$(cat "$RUNTIME/route.json" 2>/dev/null || true)"
+	case "$state" in
+		*'"mode":"proxy"'*)
+			# Heal a removed table without rewriting rules on every successful poll.
+			if [ "$PROTOCOL" = amneziawg ]; then
+				ip -4 rule show | grep -q 'iif br-lan lookup 201' && return
+			else
+				nft list table ip wifi_proxy >/dev/null 2>&1 && return
+			fi ;;
+	esac
+	"$ROUTES" proxy healthy "$generation" || true
+}
+
+case "${1:-run}" in
+	once) check_once ;;
+	run)
+		direct starting
+		trap '"$ROUTES" direct stopped || true; exit 0' INT TERM
+		while :; do
+			check_once || "$ROUTES" direct route_error || true
+			sleep 3
+		done
+		;;
+	*) exit 1 ;;
+esac

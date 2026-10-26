@@ -1,0 +1,15 @@
+#!/bin/sh
+# Fixed argv only. Defer network reload until the RPC reply has left the router.
+case "$1" in
+	proxy)
+		/etc/init.d/hysteria stop >/dev/null 2>&1
+		/etc/init.d/amneziawg stop >/dev/null 2>&1
+		if [ "$(uci -q get wifi_proxy.main.protocol)" = amneziawg ]; then
+			/etc/init.d/amneziawg start >/dev/null 2>&1
+		else
+			/etc/init.d/hysteria start >/dev/null 2>&1
+		fi ;;
+	network) (sleep 2; /etc/init.d/network reload >/dev/null 2>&1) </dev/null >/dev/null 2>&1 & ;;
+	wireless) (sleep 2; /sbin/wifi reload >/dev/null 2>&1) </dev/null >/dev/null 2>&1 & ;;
+	*) exit 1 ;;
+esac

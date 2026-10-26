@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+mkdir -p /etc/wifi-proxy
+chmod 700 /etc/wifi-proxy
+[ ! -e /etc/wifi-proxy/initialized ] || exit 0
+# The router needs independent bootstrap DNS before a hostname-based tunnel exists.
+# Client DNS follows the health-controlled route configured by the migration below.
+rm -f /etc/resolv.conf
+printf 'nameserver 9.9.9.9\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+# Deleting an optional value is allowed to fail; the main batch must succeed.
+uci -q delete network.lan.ip6assign || true
+uci -q delete 'dhcp.@dnsmasq[0].server' || true
+uci -q batch <<'UCI'
+set system.@system[0].hostname='proxys22'
+set network.lan.ipaddr='192.168.2.1'
+set network.lan.netmask='255.255.255.0'
+set network.wwan=interface
+set network.wwan.proto='dhcp'
+set network.wwan.auto='0'
+set wireless.radio0.disabled='1'
+set wireless.default_radio0.ssid='WiFi Proxy'
+set wireless.default_radio0.disabled='1'
+set dhcp.lan.dhcpv6='disabled'
+set dhcp.lan.ra='disabled'
+set dhcp.lan.ndp='disabled'
+set dhcp.@dnsmasq[0].noresolv='1'
+set firewall.@defaults[0].forward='DROP'
+set firewall.@defaults[0].flow_offloading='0'
+set firewall.@defaults[0].flow_offloading_hw='0'
+set uhttpd.main.ubus_prefix='/ubus'
+set uhttpd.main.ubus_cors='0'
+set uhttpd.main.ubus_noauth='0'
+set uhttpd.main.max_requests='3'
+set uhttpd.main.script_timeout='15'
+UCI
+
+# The vendor-provided board defaults determine port assignments and radio calibration.
+# The initial base has no forwarding; the versioned migration enables IPv4 direct fallback.
+while uci -q delete 'firewall.@forwarding[0]'; do :; done
+uci -q add_list 'firewall.@zone[1].network=wwan'
+uci commit system
+uci commit network
+uci commit wireless
+uci commit dhcp
+uci commit firewall
+uci commit uhttpd
+
+/etc/init.d/hysteria enable
+touch /etc/wifi-proxy/initialized
+exit 0

@@ -1,0 +1,7 @@
+{
+  "wifi-proxy": {
+    "description": "WiFi Proxy local administration",
+    "read": { "ubus": { "wifi_proxy": ["status", "scan_wifi"] } },
+    "write": { "ubus": { "wifi_proxy": ["import_profile", "import_awg", "set_enabled", "set_uplink", "set_wifi", "set_device_blocked"], "session": ["destroy"] } }
+  }
+}

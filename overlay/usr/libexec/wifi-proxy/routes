@@ -1,0 +1,151 @@
+#!/bin/sh
+set -eu
+
+RUNTIME=/var/run/wifi-proxy
+mkdir -p "$RUNTIME"
+# dnsmasq drops privileges and must be able to traverse this directory.
+chmod 755 "$RUNTIME"
+
+case "${1:-}" in
+	start) MODE=direct; REASON=starting ;;
+	stop) MODE=direct; REASON=stopped ;;
+	proxy|direct) MODE="$1"; REASON="${2:-healthy}" ;;
+	*) exit 1 ;;
+esac
+EXPECTED_GENERATION="${3:-}"
+PROTOCOL="$(uci -q get wifi_proxy.main.protocol 2>/dev/null || true)"
+case "$REASON" in
+	starting|stopped|healthy|disabled|unconfigured|client_stopped|client_restarting|probe_failed|recovering|dependency_missing|route_error) ;;
+	*) exit 1 ;;
+esac
+
+# Serialize the health worker and service stop/restart. Recover a dead owner's lock.
+attempt=0
+until mkdir "$RUNTIME/routes.lock" 2>/dev/null; do
+	owner="$(cat "$RUNTIME/routes.lock/pid" 2>/dev/null || true)"
+	case "$owner" in
+		'')
+			# Allow the creator time to publish its PID. A crash in that small
+			# window must not leave an empty lock blocking every future transition.
+			[ "$attempt" -lt 1 ] || rmdir "$RUNTIME/routes.lock" 2>/dev/null || true
+			;;
+		*[!0-9]*) ;;
+		*) if ! kill -0 "$owner" 2>/dev/null; then
+			rm -f "$RUNTIME/routes.lock/pid"
+			rmdir "$RUNTIME/routes.lock" 2>/dev/null || true
+		fi ;;
+	esac
+	attempt=$((attempt + 1))
+	[ "$attempt" -lt 5 ] || exit 1
+	sleep 1
+done
+printf '%s\n' "$$" > "$RUNTIME/routes.lock/pid"
+trap 'rm -f "$RUNTIME/routes.lock/pid"; rmdir "$RUNTIME/routes.lock" 2>/dev/null || true' EXIT
+trap 'exit 1' INT TERM
+
+# Recheck inside the transition lock. A service stop that won the lock before an
+# older health probe must not be undone by that probe after it finally acquires it.
+if [ "$MODE" = proxy ]; then
+	if [ "$(uci -q get wifi_proxy.main.enabled 2>/dev/null || true)" != 1 ]; then
+		MODE=direct; REASON=disabled
+	elif [ ! -s "$RUNTIME/client.generation" ]; then
+		MODE=direct; REASON=client_stopped
+	elif [ -n "$EXPECTED_GENERATION" ] &&
+		[ "$(cat "$RUNTIME/client.generation")" != "$EXPECTED_GENERATION" ]; then
+		MODE=direct; REASON=client_restarting
+	fi
+fi
+
+set_dns() {
+	local wanted
+	if [ "$1" = proxy ]; then
+		if [ "$PROTOCOL" = amneziawg ]; then
+			wanted='server=1.1.1.1@awg0'
+		else
+			wanted='server=127.0.0.1#5353'
+		fi
+	else
+		wanted="$(printf 'server=9.9.9.9\nserver=1.1.1.1')"
+	fi
+	[ "$(cat "$RUNTIME/dns.servers" 2>/dev/null || true)" != "$wanted" ] || return 0
+	# Keep the inode: dnsmasq's ujail may bind-mount this file rather than its directory.
+	# servers-file is read only at startup/SIGHUP, sent after this small write finishes.
+	printf '%s\n' "$wanted" > "$RUNTIME/dns.servers" || return 1
+	chmod 644 "$RUNTIME/dns.servers" || return 1
+	killall -HUP dnsmasq >/dev/null 2>&1 || true
+}
+
+write_state() {
+	local healthy=false state
+	[ "$1" != proxy ] || healthy=true
+	state="$(printf '{"mode":"%s","healthy":%s,"reason":"%s"}' "$1" "$healthy" "$2")"
+	[ "$(cat "$RUNTIME/route.json" 2>/dev/null || true)" != "$state" ] || return 0
+	(umask 077; printf '%s\n' "$state" > "$RUNTIME/route.json.$$") || return 1
+	mv -f "$RUNTIME/route.json.$$" "$RUNTIME/route.json" || return 1
+	logger -t wifi-proxy "mode=$1 reason=$2" 2>/dev/null || true
+}
+
+direct() {
+	local cleanup=0 state
+	if [ -e "$RUNTIME/routing.awg" ]; then
+		ip -4 rule del pref 101 iif br-lan lookup 201 >/dev/null 2>&1 || true
+		rm -f "$RUNTIME/routing.awg"
+	fi
+	state="$(cat "$RUNTIME/route.json" 2>/dev/null || true)"
+	case "$state" in *'"mode":"direct"'*) ;; *) cleanup=1 ;; esac
+	[ ! -e "$RUNTIME/routing.active" ] || cleanup=1
+	# Stop capturing first. Removing the table is one atomic nft operation.
+	if nft list table ip wifi_proxy >/dev/null 2>&1; then
+		nft delete table ip wifi_proxy || return 1
+		cleanup=1
+	fi
+	if [ "$cleanup" = 1 ]; then
+		ip -4 rule del pref 100 fwmark 0x100/0x100 lookup 100 >/dev/null 2>&1 || true
+		ip -4 route flush table 100 >/dev/null 2>&1 || true
+		rm -f "$RUNTIME/routing.active"
+	fi
+	set_dns direct || return 1
+	write_state direct "$1"
+}
+
+proxy() {
+	if [ "$PROTOCOL" = amneziawg ]; then
+		ip link show awg0 >/dev/null 2>&1 || return 1
+		(umask 077; : > "$RUNTIME/routing.awg") || return 1
+		if ! ip -4 rule show | grep -q 'iif br-lan lookup 201'; then
+			ip -4 rule add pref 101 iif br-lan lookup 201 || return 1
+		fi
+		set_dns proxy || return 1
+		write_state proxy healthy
+		return
+	fi
+	# Prepare policy routing before making any packet eligible for capture.
+	# Also mark partial setup, so a failure is cleaned up even from cached direct mode.
+	(umask 077; : > "$RUNTIME/routing.active") || return 1
+	ip -4 route replace local 0.0.0.0/0 dev lo table 100 || return 1
+	if ! ip -4 rule show | grep -q 'fwmark 0x100/0x100 lookup 100'; then
+		ip -4 rule add pref 100 fwmark 0x100/0x100 lookup 100 || return 1
+	fi
+	# add is idempotent; replace all our chains/rules together in one transaction.
+	# The independent device-blocking table at priority -151 is never touched.
+	nft -f - <<'NFT' || return 1
+add table ip wifi_proxy
+flush table ip wifi_proxy
+add chain ip wifi_proxy prerouting { type filter hook prerouting priority mangle; policy accept; }
+add rule ip wifi_proxy prerouting iifname != "br-lan" return
+add rule ip wifi_proxy prerouting ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } return
+add rule ip wifi_proxy prerouting meta l4proto tcp tproxy to :12345 meta mark set 0x100 accept
+add rule ip wifi_proxy prerouting meta l4proto udp tproxy to :12345 meta mark set 0x100 accept
+NFT
+	set_dns proxy || return 1
+	write_state proxy healthy
+}
+
+if [ "$MODE" = direct ]; then
+	direct "$REASON"
+else
+	if ! proxy; then
+		direct route_error
+		exit 1
+	fi
+fi

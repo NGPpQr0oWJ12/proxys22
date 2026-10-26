@@ -1,0 +1,6 @@
+.build/
+.private/
+dist/
+.serena/
+__pycache__/
+*.pyc
